@@ -1,0 +1,72 @@
+from __future__ import annotations
+import json
+from rich.console import Console
+from rich.markdown import Markdown
+
+from .ollama_client import OllamaClient, OllamaError
+from .tools import ToolRegistry, TOOL_SCHEMAS
+from .memory import ConversationMemory
+
+console = Console()
+
+
+class AgentLoop:
+    def __init__(self, client: OllamaClient, tools: ToolRegistry,
+                 memory: ConversationMemory, max_iterations: int = 25):
+        self.client = client
+        self.tools = tools
+        self.memory = memory
+        self.max_iterations = max_iterations
+
+    def run_turn(self, user_input: str) -> str:
+        self.memory.add("user", user_input)
+        pending_images: list[str] = []
+
+        for iteration in range(self.max_iterations):
+            messages = self.memory.as_chat_messages()
+            try:
+                reply = self.client.chat(
+                    messages, tools=TOOL_SCHEMAS,
+                    images_b64=pending_images or None,
+                )
+            except OllamaError as e:
+                console.print(f"[red]{e}[/red]")
+                return "(local model error - see above)"
+            pending_images = []
+
+            content = (reply.get("content") or "").strip()
+            tool_calls = reply.get("tool_calls") or []
+
+            if content:
+                console.print(Markdown(content))
+            self.memory.add("assistant", content or "")
+
+            if not tool_calls:
+                if self.memory.needs_compaction():
+                    console.print("[dim](«compacting older conversation history to save context»)[/dim]")
+                    self.memory.compact(self.client)
+                return content
+
+            for call in tool_calls:
+                fn = call.get("function", {})
+                name = fn.get("name", "")
+                raw_args = fn.get("arguments", {})
+                if isinstance(raw_args, str):
+                    try:
+                        raw_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        raw_args = {}
+
+                console.print(f"[dim]→ tool call: {name}({json.dumps(raw_args)[:200]})[/dim]")
+                result = self.tools.execute(name, raw_args)
+
+                # Feed the tool result back into the conversation
+                shown = result.text if len(result.text) < 4000 else result.text[:4000] + "\n...(truncated)"
+                self.memory.add("tool", f"[{name}] {shown}")
+
+                if result.image_b64:
+                    pending_images.append(result.image_b64)
+
+        console.print("[yellow]Hit the tool-call safety limit for this turn - stopping here. "
+                       "Ask me to continue if more work is needed.[/yellow]")
+        return "(stopped: reached max tool iterations for this turn)"

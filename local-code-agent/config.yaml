@@ -1,0 +1,42 @@
+# Local Code Agent configuration
+# Everything here runs against your local Ollama server - no internet required.
+
+ollama:
+  host: "http://localhost:11434"
+  chat_model: "qwen3.5:4b"        # main coding + vision model
+  embed_model: "nomic-embed-text"  # tiny embedding model used for codebase search
+  context_window: 8192             # keep modest on CPU-only 8GB boxes; raise if you have headroom
+  temperature: 0.3
+  enable_thinking: false           # qwen3.5 small series: true = better reasoning, slower
+
+agent:
+  max_tool_iterations: 25          # safety cap on tool-call loops per turn
+  history_soft_limit_tokens: 6000  # summarize older turns past this to stay inside context_window
+
+permissions:
+  # "ask" = prompt every single time (safest, matches "permission in all cases")
+  # "ask_once_per_session" = prompt once per file/command, then remember for this run only
+  mode: "ask"
+  # Paths the agent is allowed to ever touch. Empty = current working directory only.
+  allowed_roots: []
+  # Commands that are always denied outright, no prompt, regardless of user approval.
+  hard_denylist:
+    - "rm -rf /"
+    - ":(){ :|:& };:"
+    - "mkfs"
+    - "dd if="
+
+index:
+  db_path: ".local_agent/index.sqlite3"
+  chunk_lines: 80
+  chunk_overlap_lines: 10
+  ignore_dirs:
+    - ".git"
+    - "node_modules"
+    - "__pycache__"
+    - ".venv"
+    - "venv"
+    - "dist"
+    - "build"
+    - ".local_agent"
+  max_file_size_kb: 512
