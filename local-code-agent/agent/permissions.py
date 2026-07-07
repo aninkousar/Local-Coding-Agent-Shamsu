@@ -98,6 +98,32 @@ class PermissionManager:
     def _write_pre_allowed(self, path: Path) -> bool:
         return self._session_allow_all_writes or f"write:{path}" in self._session_allow_paths
 
+    def request_write_batch(self, paths: list[Path]) -> bool:
+        """One approval covering several files at once (e.g. scaffolding a new project).
+        Callers must render all previews/diffs to the user before calling this."""
+        for p in paths:
+            if not self._within_allowed_roots(p):
+                console.print(f"[red]Blocked:[/red] {p} is outside the allowed project directory.")
+                return False
+        if self._session_allow_all_writes:
+            return True
+        choice = self._ask(
+            f"Create/modify these {len(paths)} files as shown above?",
+            danger="This will write multiple files to disk.",
+        )
+        if choice == "y":
+            return True
+        if choice in ("always", "session"):
+            self._session_allow_all_writes = True
+            return True
+        return False
+
+    def request_action(self, description: str) -> bool:
+        """Generic one-off approval for actions that aren't a file read/write/command
+        (e.g. opening a browser preview)."""
+        choice = self._ask(description)
+        return choice in ("y", "always", "session")
+
     # -- shell commands -------------------------------------------------------
     def request_command(self, command: str) -> bool:
         for bad in self.hard_denylist:
