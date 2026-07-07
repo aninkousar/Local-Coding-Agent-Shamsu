@@ -91,6 +91,23 @@ launch-agent.bat C:\path\to\my-project     REM skip the folder prompt
 
 All three will tell you clearly if setup hasn't been run yet, instead of failing silently.
 
+## Built for web app work specifically
+
+A few tools exist mainly because "build me a web app" has needs plain coding doesn't:
+
+- **`start_dev_server` / `check_process_output` / `stop_process`** - `run_command` blocks until
+  a command finishes, which means it would hang forever on `flask run` or `npm start`. These
+  three give the agent a way to launch something that keeps running, check its logs without
+  blocking, and stop it - all still permission-gated like everything else.
+- **`scaffold_files`** - creates a whole new project's initial file set (e.g. `index.html`,
+  `style.css`, `app.py`) as one reviewed batch instead of N separate approval prompts.
+- **`open_in_browser`** - opens a local HTML file or a running dev server's URL in your default
+  browser so you can see the actual rendered result immediately (stdlib only, no new dependency).
+
+The system prompt also nudges the model toward plain HTML/CSS/JS or server-rendered templates
+(e.g. Flask+Jinja2) by default, rather than framework/bundler-heavy stacks - a 4B model is far
+more reliable on the simpler stack unless you specifically ask for something else.
+
 ## Setup
 
 **Requirements:** Python 3.10+, ~6GB free disk space for models, internet access *only* for this
