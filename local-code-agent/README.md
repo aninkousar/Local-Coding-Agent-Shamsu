@@ -64,6 +64,33 @@ projector together, runs as a plain background service, and needs zero manual co
 Windows/Mac/Linux. If you outgrow it, everything here talks to a normal `/api/chat` HTTP
 endpoint, so you can point `config.yaml`'s `ollama.host` at any Ollama-compatible server instead.
 
+## Launching from a dedicated terminal window
+
+If activating the venv every time is annoying (or you keep landing in the wrong shell type),
+use the launcher for your OS instead of the manual steps above. Each one opens its **own new
+terminal window**, activates the environment, moves into your project folder, and starts
+`local-agent` - so your original terminal is untouched if anything goes wrong.
+
+**Windows (cmd or double-click):**
+```
+launch-agent.bat
+launch-agent.bat C:\path\to\my-project     REM skip the folder prompt
+```
+
+**Windows (PowerShell):**
+```powershell
+.\launch-agent.ps1
+.\launch-agent.ps1 -ProjectPath C:\path\to\my-project
+```
+
+**Mac/Linux:**
+```bash
+./launch-agent.sh
+./launch-agent.sh /path/to/my-project
+```
+
+All three will tell you clearly if setup hasn't been run yet, instead of failing silently.
+
 ## Setup
 
 **Requirements:** Python 3.10+, ~6GB free disk space for models, internet access *only* for this
