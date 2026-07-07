@@ -1,6 +1,9 @@
 from __future__ import annotations
 import fnmatch
 import subprocess
+import threading
+import webbrowser
+from collections import deque
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Any
@@ -20,6 +23,13 @@ console = Console()
 class ToolResult:
     text: str
     image_b64: str | None = None
+
+
+@dataclass
+class _RunningProcess:
+    proc: subprocess.Popen
+    output: deque
+    command: str
 
 
 TOOL_SCHEMAS = [
@@ -155,6 +165,79 @@ TOOL_SCHEMAS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "scaffold_files",
+            "description": "Create or overwrite several files at once as a single reviewed batch - use this when setting up a new project's structure (e.g. a web app's initial HTML/CSS/JS or Flask files) instead of many separate write_file calls. Shows all diffs together and asks for one approval covering the whole batch.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "description": "List of files to create/overwrite.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "Relative path from project root."},
+                                "content": {"type": "string", "description": "Full file content."},
+                            },
+                            "required": ["path", "content"],
+                        },
+                    },
+                },
+                "required": ["files"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_dev_server",
+            "description": "Start a long-running background process that does NOT exit on its own - a dev server, file watcher, or similar (e.g. 'flask run', 'npm start', 'python -m http.server'). Use this instead of run_command for anything that keeps running. Returns a process_id to check logs or stop it later.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The shell command to run in the background."}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_process_output",
+            "description": "Check the recent log output and running/exited status of a background process started with start_dev_server.",
+            "parameters": {
+                "type": "object",
+                "properties": {"process_id": {"type": "string", "description": "The process_id returned by start_dev_server."}},
+                "required": ["process_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_process",
+            "description": "Stop a background process previously started with start_dev_server.",
+            "parameters": {
+                "type": "object",
+                "properties": {"process_id": {"type": "string", "description": "The process_id returned by start_dev_server."}},
+                "required": ["process_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_in_browser",
+            "description": "Open a local HTML file (or a URL, e.g. a running dev server's address) in the user's default web browser, so they can see the rendered result. Use this after building or changing a web page/UI.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path_or_url": {"type": "string", "description": "A relative file path, or a full http(s) URL."}},
+                "required": ["path_or_url"],
+            },
+        },
+    },
 ]
 
 
@@ -165,6 +248,17 @@ class ToolRegistry:
         self.perm = permissions
         self.index = index
         self.index_cfg = index_cfg
+        self._processes: dict[str, _RunningProcess] = {}
+        self._process_counter = 0
+
+    def shutdown(self) -> None:
+        """Stop any background dev servers still running when the agent exits."""
+        for pid, rp in self._processes.items():
+            if rp.proc.poll() is None:
+                try:
+                    rp.proc.terminate()
+                except OSError:
+                    pass
 
     def _resolve(self, rel_path: str) -> Path:
         p = (self.root / rel_path).resolve()
@@ -312,3 +406,94 @@ class ToolRegistry:
         )
         stats = self.index.stats()
         return ToolResult(text=f"Indexed. {stats['files']} files, {stats['chunks']} chunks total ({written} new/updated).")
+
+    def _tool_scaffold_files(self, files: list[dict]) -> ToolResult:
+        if not files:
+            return ToolResult(text="No files given.")
+        previews = []
+        for f in files:
+            path = f.get("path")
+            content = f.get("content", "")
+            if not path:
+                return ToolResult(text="Each entry needs a 'path'.")
+            target = self._resolve(path)
+            old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+            diff = make_unified_diff(old_text, content, path)
+            previews.append((target, path, content, diff))
+
+        console.print(f"\n[bold]Proposed project scaffold - {len(previews)} file(s):[/bold]")
+        for target, path, content, diff in previews:
+            console.print(f"\n[cyan]{path}[/cyan]")
+            render_diff(diff)
+
+        if not self.perm.request_write_batch([t for t, _, _, _ in previews]):
+            return ToolResult(text="Permission denied by user. No files changed.")
+
+        for target, path, content, _ in previews:
+            apply_edit(target, content)
+        return ToolResult(text=f"Created/updated {len(previews)} files: " +
+                                ", ".join(p for _, p, _, _ in previews))
+
+    def _tool_start_dev_server(self, command: str) -> ToolResult:
+        if not self.perm.request_command(command):
+            return ToolResult(text="Permission denied by user. Server not started.")
+        try:
+            proc = subprocess.Popen(
+                command, shell=True, cwd=str(self.root),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+        except OSError as e:
+            return ToolResult(text=f"Failed to start '{command}': {e}")
+
+        self._process_counter += 1
+        process_id = f"proc{self._process_counter}"
+        output: deque = deque(maxlen=300)
+        self._processes[process_id] = _RunningProcess(proc=proc, output=output, command=command)
+
+        def _reader():
+            try:
+                for line in proc.stdout:
+                    output.append(line.rstrip())
+            except (ValueError, OSError):
+                pass  # pipe closed when the process is stopped/exits
+
+        threading.Thread(target=_reader, daemon=True).start()
+        return ToolResult(
+            text=f"Started '{command}' in the background as process_id='{process_id}'. "
+                 f"It keeps running - use check_process_output(process_id='{process_id}') to see logs, "
+                 f"and stop_process(process_id='{process_id}') when done."
+        )
+
+    def _tool_check_process_output(self, process_id: str) -> ToolResult:
+        rp = self._processes.get(process_id)
+        if not rp:
+            return ToolResult(text=f"No such process_id: {process_id}")
+        status = "running" if rp.proc.poll() is None else f"exited (code {rp.proc.returncode})"
+        log = "\n".join(rp.output) or "(no output yet)"
+        return ToolResult(text=f"[{process_id}] '{rp.command}' - {status}\n{log}")
+
+    def _tool_stop_process(self, process_id: str) -> ToolResult:
+        rp = self._processes.get(process_id)
+        if not rp:
+            return ToolResult(text=f"No such process_id: {process_id}")
+        if rp.proc.poll() is None:
+            rp.proc.terminate()
+            return ToolResult(text=f"Stopped {process_id} ('{rp.command}').")
+        return ToolResult(text=f"{process_id} had already exited (code {rp.proc.returncode}).")
+
+    def _tool_open_in_browser(self, path_or_url: str) -> ToolResult:
+        if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+            target_desc = path_or_url
+            url = path_or_url
+        else:
+            target = self._resolve(path_or_url)
+            if not target.exists():
+                return ToolResult(text=f"File does not exist: {path_or_url}")
+            target_desc = str(target.relative_to(self.root))
+            url = target.as_uri()
+
+        if not self.perm.request_action(f"Open [cyan]{target_desc}[/cyan] in your default browser?"):
+            return ToolResult(text="Permission denied by user.")
+        webbrowser.open(url)
+        return ToolResult(text=f"Opened {target_desc} in your default browser.")
