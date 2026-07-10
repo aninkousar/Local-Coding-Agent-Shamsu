@@ -79,6 +79,8 @@ def main():
         context_window=cfg.context_window,
         temperature=cfg.temperature,
         enable_thinking=cfg.enable_thinking,
+        keep_alive=cfg.keep_alive,
+        embed_batch_size=cfg.embed_batch_size,
     )
 
     if not startup_checks(client, cfg):
