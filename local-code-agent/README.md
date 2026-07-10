@@ -190,12 +190,51 @@ with no override.
   summarizes older turns automatically. This is what keeps sessions "unlimited" without the
   context window growing forever on limited RAM.
 
+## Further performance tuning
+
+Beyond what's built in above, these are server-level settings you can layer on top - some are
+genuinely worth trying, all are optional:
+
+- **`OLLAMA_KEEP_ALIVE`**: `config.yaml`'s `ollama.keep_alive: "30m"` already tells Ollama to
+  keep the model loaded between turns, so it shouldn't reload mid-session. If you still notice a
+  reload pause after a long gap (e.g. you stepped away while reviewing a diff), you can also set
+  `OLLAMA_KEEP_ALIVE=-1` when starting the Ollama server so it never unloads at all - at the cost
+  of it sitting in RAM permanently.
+- **`OLLAMA_FLASH_ATTENTION=1` + `OLLAMA_KV_CACHE_TYPE=q8_0`**: roughly halves the memory used by
+  the conversation's context cache as sessions get longer. Set both as environment variables
+  before starting `ollama serve` (on Windows: System Settings → Environment Variables, then
+  restart Ollama). The benefit is most documented on GPU; on CPU-only it's still worth trying,
+  but confirm it actually helped rather than assuming - check `ollama show qwen3.5:4b` or the
+  server log after setting it.
+- **Context caching happens automatically**: Ollama/llama.cpp reuse the already-processed part of
+  a conversation (like the system prompt) instead of reprocessing it every turn, as long as
+  earlier messages aren't changed - which is why `memory.py` only ever appends or (rarely)
+  compacts, never edits history in place.
+- **Free up real RAM**: on an 8GB machine, closing your browser/IDE while running the agent
+  matters more than any config flag - once you're paging to disk, everything slows down by an
+  order of magnitude.
+- **Use an SSD, not an HDD**, for wherever `.venv`/Ollama's model store lives - model loading is
+  disk-bound the moment RAM is tight.
+
+Two further upgrades now built in:
+- **Streaming output**: the agent prints tokens as they generate instead of waiting for the
+  full reply - doesn't reduce total time, but the wait feels much shorter.
+- **Structure-aware code chunking**: `.py` files are chunked by actual function/class
+  boundaries (via Python's `ast` module) instead of blind line windows. Many other languages
+  (JS/TS, Java, C/C++, C#, Go, Rust, Ruby, PHP, Swift, Kotlin, Scala) get a lighter-weight
+  regex heuristic that looks for lines starting a function/class/method - not a real parser,
+  so unusual formatting or patterns like arrow-function assignments can still slip through
+  and get folded into the previous chunk, but it's meaningfully better than fixed-line windows
+  for typical code. Anything unrecognized (plain text, JSON/YAML/config, or a parse failure)
+  falls straight back to the original fixed-line chunker, so nothing breaks.
+
 ## Known limitations (be honest with yourself about these)
 
 - No true multi-file transactional edits - each `edit_file`/`write_file` call is its own
   approval. For a change spanning many files, expect many prompts.
-- The semantic index uses simple fixed-size chunking, not AST-aware parsing - it's good at
-  "find code related to X," not perfect recall of exact structure.
+- The semantic index chunks Python by real AST structure and other languages by a regex
+  heuristic (not a real parser) - good at "find code related to X," but not immune to
+  misfiring on unusual code formatting in non-Python files.
 - Tool-calling reliability on a 4B model is good but not perfect; if the agent seems to loop or
   stall, it may not have emitted a valid tool call - try rephrasing your request more concretely.
 - Scanned/image-only PDFs aren't read as text - export the page as an image and use `read_image`
