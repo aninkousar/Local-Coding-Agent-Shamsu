@@ -45,6 +45,14 @@ class Config:
         return bool(self.raw.get("ollama", {}).get("enable_thinking", False))
 
     @property
+    def keep_alive(self):
+        return self.raw.get("ollama", {}).get("keep_alive", "30m")
+
+    @property
+    def embed_batch_size(self) -> int:
+        return int(self.raw.get("ollama", {}).get("embed_batch_size", 32))
+
+    @property
     def max_tool_iterations(self) -> int:
         return int(self.raw.get("agent", {}).get("max_tool_iterations", 25))
 
