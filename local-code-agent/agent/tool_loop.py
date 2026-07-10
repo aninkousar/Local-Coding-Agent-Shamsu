@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json
 from rich.console import Console
-from rich.markdown import Markdown
 
 from .ollama_client import OllamaClient, OllamaError
 from .tools import ToolRegistry, TOOL_SCHEMAS
@@ -24,21 +23,26 @@ class AgentLoop:
 
         for iteration in range(self.max_iterations):
             messages = self.memory.as_chat_messages()
+            content = ""
+            tool_calls: list[dict] = []
             try:
-                reply = self.client.chat(
-                    messages, tools=TOOL_SCHEMAS,
-                    images_b64=pending_images or None,
-                )
+                for event in self.client.chat_stream(
+                    messages, tools=TOOL_SCHEMAS, images_b64=pending_images or None,
+                ):
+                    if event["type"] == "content":
+                        # markup/highlight off: model output often contains [brackets] and
+                        # code that Rich would otherwise try to interpret as its own markup
+                        console.print(event["delta"], end="", markup=False, highlight=False)
+                    elif event["type"] == "done":
+                        content = event["content"].strip()
+                        tool_calls = event.get("tool_calls") or []
             except OllamaError as e:
                 console.print(f"[red]{e}[/red]")
                 return "(local model error - see above)"
             pending_images = []
 
-            content = (reply.get("content") or "").strip()
-            tool_calls = reply.get("tool_calls") or []
-
             if content:
-                console.print(Markdown(content))
+                console.print()  # newline after the streamed text
             self.memory.add("assistant", content or "")
 
             if not tool_calls:
