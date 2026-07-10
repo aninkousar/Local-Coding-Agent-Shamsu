@@ -8,6 +8,10 @@ ollama:
   context_window: 8192             # keep modest on CPU-only 8GB boxes; raise if you have headroom
   temperature: 0.3
   enable_thinking: false           # qwen3.5 small series: true = better reasoning, slower
+  keep_alive: "30m"                # keeps the model loaded between turns - avoids reload
+                                    # latency while you're reading diffs/approving prompts.
+                                    # Use -1 to never unload, or "5m" to go back to Ollama's default.
+  embed_batch_size: 32              # how many chunks to embed per HTTP call during indexing
 
 agent:
   max_tool_iterations: 25          # safety cap on tool-call loops per turn
