@@ -18,13 +18,16 @@ class OllamaClient:
 
     def __init__(self, host: str, chat_model: str, embed_model: str,
                  context_window: int = 8192, temperature: float = 0.3,
-                 enable_thinking: bool = False):
+                 enable_thinking: bool = False, keep_alive: str | int = "30m",
+                 embed_batch_size: int = 32):
         self.host = host.rstrip("/")
         self.chat_model = chat_model
         self.embed_model = embed_model
         self.context_window = context_window
         self.temperature = temperature
         self.enable_thinking = enable_thinking
+        self.keep_alive = keep_alive
+        self.embed_batch_size = embed_batch_size
 
     # -- health -------------------------------------------------------------
     def ping(self) -> bool:
@@ -49,27 +52,7 @@ class OllamaClient:
         """Single non-streaming chat turn. Returns the raw `message` dict from Ollama,
         which may include `content` and/or `tool_calls`.
         """
-        if images_b64 and messages:
-            # attach images to the most recent user message
-            last = messages[-1]
-            if last.get("role") == "user":
-                last = dict(last)
-                last["images"] = images_b64
-                messages = messages[:-1] + [last]
-
-        payload: dict[str, Any] = {
-            "model": self.chat_model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": self.temperature,
-                "num_ctx": self.context_window,
-            },
-        }
-        if tools:
-            payload["tools"] = tools
-        payload["think"] = self.enable_thinking
-
+        payload = self._build_chat_payload(messages, tools, images_b64, stream=False)
         try:
             r = requests.post(f"{self.host}/api/chat", json=payload, timeout=600)
             r.raise_for_status()
@@ -83,20 +66,92 @@ class OllamaClient:
             raise OllamaError(f"Unexpected Ollama response: {data}")
         return data["message"]
 
+    def chat_stream(self, messages: list[dict], tools: list[dict] | None = None,
+                     images_b64: list[str] | None = None):
+        """Streaming chat turn. Yields dicts as they arrive:
+          {"type": "content", "delta": "..."}   - one for each streamed text fragment
+          {"type": "done", "content": "...", "tool_calls": [...]}  - once, at the end
+
+        Callers should print each "content" delta live, then use the final "done"
+        event's accumulated content/tool_calls exactly like the non-streaming chat().
+        """
+        payload = self._build_chat_payload(messages, tools, images_b64, stream=True)
+        full_content = []
+        tool_calls: list[dict] = []
+        try:
+            with requests.post(f"{self.host}/api/chat", json=payload, timeout=600, stream=True) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    msg = chunk.get("message", {}) or {}
+                    delta = msg.get("content", "")
+                    if delta:
+                        full_content.append(delta)
+                        yield {"type": "content", "delta": delta}
+                    if msg.get("tool_calls"):
+                        tool_calls = msg["tool_calls"]
+                    if chunk.get("done"):
+                        break
+        except requests.RequestException as e:
+            raise OllamaError(
+                f"Could not reach local Ollama server at {self.host}. "
+                f"Is it running? (`ollama serve`). Details: {e}"
+            )
+        yield {"type": "done", "content": "".join(full_content), "tool_calls": tool_calls}
+
+    def _build_chat_payload(self, messages: list[dict], tools: list[dict] | None,
+                             images_b64: list[str] | None, stream: bool) -> dict:
+        if images_b64 and messages:
+            # attach images to the most recent user message
+            last = messages[-1]
+            if last.get("role") == "user":
+                last = dict(last)
+                last["images"] = images_b64
+                messages = messages[:-1] + [last]
+
+        payload: dict[str, Any] = {
+            "model": self.chat_model,
+            "messages": messages,
+            "stream": stream,
+            "keep_alive": self.keep_alive,
+            "options": {
+                "temperature": self.temperature,
+                "num_ctx": self.context_window,
+            },
+        }
+        if tools:
+            payload["tools"] = tools
+        payload["think"] = self.enable_thinking
+        return payload
+
     # -- embeddings ------------------------------------------------------------
     def embed(self, texts: list[str]) -> list[list[float]]:
-        out = []
-        for t in texts:
+        """Uses the modern /api/embed endpoint, which batches multiple inputs into a
+        single request - one HTTP round-trip per batch instead of one per chunk, which
+        matters a lot when indexing a codebase with hundreds of chunks.
+        """
+        if not texts:
+            return []
+        out: list[list[float]] = []
+        for i in range(0, len(texts), self.embed_batch_size):
+            batch = texts[i:i + self.embed_batch_size]
             try:
                 r = requests.post(
-                    f"{self.host}/api/embeddings",
-                    json={"model": self.embed_model, "prompt": t},
-                    timeout=120,
+                    f"{self.host}/api/embed",
+                    json={"model": self.embed_model, "input": batch, "keep_alive": self.keep_alive},
+                    timeout=180,
                 )
                 r.raise_for_status()
-                out.append(r.json().get("embedding", []))
+                embeddings = r.json().get("embeddings", [])
             except requests.RequestException as e:
                 raise OllamaError(f"Embedding call failed: {e}")
+            if len(embeddings) != len(batch):
+                raise OllamaError(
+                    f"Embedding batch mismatch: sent {len(batch)} texts, got {len(embeddings)} vectors back."
+                )
+            out.extend(embeddings)
         return out
 
     @staticmethod
