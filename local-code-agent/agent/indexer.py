@@ -1,5 +1,7 @@
 from __future__ import annotations
+import ast
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -13,6 +15,31 @@ TEXT_LIKE_EXTS = {
     ".html", ".css", ".scss", ".sql", ".yaml", ".yml", ".json", ".md",
     ".txt", ".toml", ".ini", ".cfg", ".dockerfile", ".vue",
 }
+
+# Extensions where a lightweight regex-based "does this line start a function/class"
+# heuristic is worth trying before falling back to blind fixed-line chunking.
+HEURISTIC_STRUCTURE_EXTS = {
+    ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp",
+    ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala",
+}
+
+_STRUCTURE_MARKERS = [
+    re.compile(r'^\s*(export\s+)?(default\s+)?(async\s+)?function\b'),          # JS/TS
+    re.compile(r'^\s*(export\s+)?(default\s+)?(abstract\s+)?class\s+\w+'),      # JS/TS/Java/C#/PHP
+    re.compile(r'^\s*(export\s+)?interface\s+\w+'),                             # TS
+    re.compile(r'^\s*(public|private|protected|internal|static|final|virtual|'
+               r'override|async|def)\s+.*\)\s*\{?\s*$'),                        # Java/C#/C++-ish method
+    re.compile(r'^func\s+'),                                                    # Go
+    re.compile(r'^\s*(pub\s+)?(async\s+)?fn\s+\w+'),                            # Rust
+    re.compile(r'^\s*(pub\s+)?struct\s+\w+'),                                   # Rust/Go
+    re.compile(r'^\s*def\s+\w+'),                                               # Ruby
+    re.compile(r'^\s*(public\s+|private\s+|protected\s+|static\s+)*function\s+\w+'),  # PHP
+]
+
+# Hard ceiling on a single structure-aware chunk, in case markers are sparse
+# (e.g. one giant function, or minified code) - keeps any one chunk from
+# ballooning and dominating an embedding/search result.
+_MAX_STRUCTURED_CHUNK_LINES = 250
 
 
 def _iter_source_files(root: Path, ignore_dirs: set[str], max_kb: int):
@@ -31,7 +58,9 @@ def _iter_source_files(root: Path, ignore_dirs: set[str], max_kb: int):
         yield p
 
 
-def _chunk_file(path: Path, chunk_lines: int, overlap: int):
+def _chunk_file_fixed(path: Path, chunk_lines: int, overlap: int):
+    """Blind fixed-size line-window chunking. Used as the fallback for anything
+    the structure-aware chunkers below don't recognize or can't parse."""
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -47,6 +76,94 @@ def _chunk_file(path: Path, chunk_lines: int, overlap: int):
             yield start + 1, end, chunk
         if end == len(lines):
             break
+
+
+def _chunk_python_ast(path: Path):
+    """Chunk a Python file by top-level function/class definitions using the stdlib
+    `ast` module - each chunk is one complete, semantically meaningful unit instead
+    of an arbitrary line window. Returns None (signalling "fall back") if the file
+    doesn't parse or has no top-level def/class structure to key off of.
+    """
+    try:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+
+    lines = source.splitlines()
+    if not lines:
+        return None
+
+    top_level = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    if not top_level:
+        return None  # e.g. a plain script with no def/class - let the fixed-line chunker handle it
+
+    chunks = []
+    first_start = top_level[0].lineno
+    if first_start > 1:
+        preamble = "\n".join(lines[:first_start - 1]).strip()
+        if preamble:
+            chunks.append((1, first_start - 1, preamble))
+
+    for node in top_level:
+        start = node.lineno
+        end = getattr(node, "end_lineno", None) or start
+        segment = "\n".join(lines[start - 1:end])
+        if segment.strip():
+            chunks.append((start, end, segment))
+
+    return chunks
+
+
+def _chunk_by_markers(path: Path, chunk_lines: int):
+    """Regex-heuristic structure-aware chunking for non-Python languages: split at
+    lines that look like a function/class/method definition. Not a real parser, so
+    it can misfire on unusual formatting - falls back to fixed-line chunking (via
+    returning None) if no markers are found at all.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    if not lines:
+        return None
+
+    marker_idxs = [i for i, line in enumerate(lines) if any(p.match(line) for p in _STRUCTURE_MARKERS)]
+    if not marker_idxs:
+        return None
+
+    cap = max(chunk_lines, _MAX_STRUCTURED_CHUNK_LINES)
+    chunks = []
+    if marker_idxs[0] > 0:
+        pre = "\n".join(lines[:marker_idxs[0]]).strip()
+        if pre:
+            chunks.append((1, marker_idxs[0], pre))
+
+    for idx, start in enumerate(marker_idxs):
+        natural_end = marker_idxs[idx + 1] if idx + 1 < len(marker_idxs) else len(lines)
+        end = min(natural_end, start + cap)
+        segment = "\n".join(lines[start:end])
+        if segment.strip():
+            chunks.append((start + 1, end, segment))
+
+    return chunks
+
+
+def _smart_chunk_file(path: Path, chunk_lines: int, overlap: int):
+    """Dispatch to the best available chunker for this file type, falling back to
+    blind fixed-line chunking for anything without recognizable code structure
+    (plain text, JSON/YAML/config, markup, or a parse failure)."""
+    ext = path.suffix.lower()
+    if ext == ".py":
+        result = _chunk_python_ast(path)
+        if result is not None:
+            return result
+    elif ext in HEURISTIC_STRUCTURE_EXTS:
+        result = _chunk_by_markers(path, chunk_lines)
+        if result is not None:
+            return result
+    return list(_chunk_file_fixed(path, chunk_lines, overlap))
 
 
 class CodebaseIndex:
@@ -91,7 +208,7 @@ class CodebaseIndex:
                 continue  # unchanged since last index
 
             self.conn.execute("DELETE FROM chunks WHERE path = ?", (rel,))
-            chunks = list(_chunk_file(f, chunk_lines, overlap))
+            chunks = _smart_chunk_file(f, chunk_lines, overlap)
             if not chunks:
                 continue
             texts = [c[2] for c in chunks]
