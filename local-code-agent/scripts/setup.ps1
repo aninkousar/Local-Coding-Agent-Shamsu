@@ -21,7 +21,11 @@ pip install -e .
 
 Write-Host ""
 Write-Host "Setup complete. From now on this agent runs fully offline."
-Write-Host "To start it:"
+Write-Host "To start it (terminal):"
 Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host "  cd \path\to\your\project"
 Write-Host "  local-agent"
+Write-Host ""
+Write-Host "Or, for a GUI app window instead of a terminal:"
+Write-Host "  pip install pywebview   # optional, gives a real app window instead of a browser tab"
+Write-Host "  local-agent-gui"
