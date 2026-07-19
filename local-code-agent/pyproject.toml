@@ -12,13 +12,19 @@ dependencies = [
     "rich>=13.7.0",
     "PyYAML>=6.0.1",
     "numpy>=1.26.0",
+    "flask>=3.0.0",
 ]
 
 [project.optional-dependencies]
 documents = ["pypdf>=4.0.0", "python-docx>=1.1.0"]
+gui-window = ["pywebview>=5.0"]
 
 [project.scripts]
 local-agent = "agent.main:main"
+local-agent-gui = "gui.launch:main"
 
 [tool.setuptools]
-packages = ["agent"]
+packages = ["agent", "gui"]
+
+[tool.setuptools.package-data]
+gui = ["static/*"]
