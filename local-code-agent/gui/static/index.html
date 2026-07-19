@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Local Code Agent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="dot" id="status-dot"></span>
+      <span class="brand">Local Code Agent</span>
+      <span class="model-tag" id="model-tag">connecting…</span>
+    </div>
+    <div class="topbar-right">
+      <span class="project-path" id="project-path"></span>
+      <button class="btn-ghost" id="reindex-btn" title="Rescan this project for codebase search">Reindex</button>
+    </div>
+  </header>
+
+  <main class="transcript" id="transcript">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-mark">◆</div>
+      <p>Ask me to explain this codebase, build something new, or hand me a requirements file or screenshot.</p>
+      <p class="empty-sub">Every file read, file write, and shell command will ask for your approval first.</p>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <textarea id="input" placeholder="Message the agent… (Enter to send, Shift+Enter for a new line)" rows="1"></textarea>
+    <button id="send-btn" title="Send">Send</button>
+  </footer>
+
+</div>
+
+<template id="tpl-user-msg">
+  <div class="msg msg-user"><div class="msg-bubble"></div></div>
+</template>
+
+<template id="tpl-turn">
+  <div class="msg msg-agent">
+    <div class="turn-body"></div>
+  </div>
+</template>
+
+<template id="tpl-tool-call">
+  <div class="tool-call">
+    <span class="tool-call-icon">→</span>
+    <span class="tool-call-name"></span>
+    <span class="tool-call-args"></span>
+  </div>
+</template>
+
+<template id="tpl-tool-result">
+  <details class="tool-result">
+    <summary></summary>
+    <pre class="tool-result-body"></pre>
+  </details>
+</template>
+
+<template id="tpl-permission">
+  <div class="permission-card">
+    <div class="permission-kind"></div>
+    <div class="permission-message"></div>
+    <div class="permission-danger"></div>
+    <pre class="permission-diff" hidden></pre>
+    <div class="permission-actions">
+      <button class="perm-btn perm-allow" data-decision="y">Allow once</button>
+      <button class="perm-btn perm-session" data-decision="session">Allow for this session</button>
+      <button class="perm-btn perm-deny" data-decision="n">Deny</button>
+    </div>
+    <div class="permission-resolved" hidden></div>
+  </div>
+</template>
+
+<template id="tpl-status">
+  <div class="status-line"></div>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>
