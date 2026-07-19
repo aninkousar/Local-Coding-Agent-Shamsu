@@ -355,7 +355,7 @@ class ToolRegistry:
         diff = make_unified_diff(old_text, content, path)
         console.print(f"\n[bold]Proposed change to {path}:[/bold]")
         render_diff(diff)
-        if not self.perm.request_write(target):
+        if not self.perm.request_write(target, preview=diff):
             return ToolResult(text="Permission denied by user. File not changed.")
         apply_edit(target, content)
         return ToolResult(text=f"Wrote {path} ({len(content.splitlines())} lines).")
@@ -374,7 +374,7 @@ class ToolRegistry:
         diff = make_unified_diff(current, new_content, path)
         console.print(f"\n[bold]Proposed edit to {path}:[/bold]")
         render_diff(diff)
-        if not self.perm.request_write(target):
+        if not self.perm.request_write(target, preview=diff):
             return ToolResult(text="Permission denied by user. File not changed.")
         apply_edit(target, new_content)
         return ToolResult(text=f"Edited {path}.")
@@ -426,7 +426,8 @@ class ToolRegistry:
             console.print(f"\n[cyan]{path}[/cyan]")
             render_diff(diff)
 
-        if not self.perm.request_write_batch([t for t, _, _, _ in previews]):
+        if not self.perm.request_write_batch([t for t, _, _, _ in previews],
+                                              diffs=[d for _, _, _, d in previews]):
             return ToolResult(text="Permission denied by user. No files changed.")
 
         for target, path, content, _ in previews:
