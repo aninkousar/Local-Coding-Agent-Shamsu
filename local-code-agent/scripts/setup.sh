@@ -25,7 +25,11 @@ pip install -e .
 
 echo ""
 echo "Setup complete. From now on this agent runs fully offline."
-echo "To start it:"
+echo "To start it (terminal):"
 echo "  source $(pwd)/.venv/bin/activate"
 echo "  cd /path/to/your/project"
 echo "  local-agent"
+echo ""
+echo "Or, for a GUI app window instead of a terminal:"
+echo "  pip install pywebview   # optional, gives a real app window instead of a browser tab"
+echo "  local-agent-gui"
