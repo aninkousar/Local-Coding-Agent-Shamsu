@@ -3,6 +3,7 @@ import ast
 import json
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -171,23 +172,28 @@ class CodebaseIndex:
         self.db_path = db_path
         self.client = client
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path))
+        # check_same_thread=False + an explicit lock: the CLI is single-threaded so this
+        # is a no-op there, but the GUI's Flask server handles requests on a thread pool,
+        # and a bare sqlite3 connection isn't safe to touch from more than one thread.
+        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._ensure_schema()
 
     def _ensure_schema(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT NOT NULL,
-                start_line INTEGER,
-                end_line INTEGER,
-                content TEXT,
-                embedding BLOB,
-                mtime REAL
-            )
-        """)
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_path ON chunks(path)")
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL,
+                    start_line INTEGER,
+                    end_line INTEGER,
+                    content TEXT,
+                    embedding BLOB,
+                    mtime REAL
+                )
+            """)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_path ON chunks(path)")
+            self.conn.commit()
 
     def build(self, root: Path, ignore_dirs: set[str], chunk_lines: int,
               overlap: int, max_file_kb: int, progress_cb=None) -> int:
@@ -200,39 +206,48 @@ class CodebaseIndex:
             mtime = f.stat().st_mtime
             rel = str(f.relative_to(root))
 
-            cur = self.conn.execute(
-                "SELECT MAX(mtime) FROM chunks WHERE path = ?", (rel,)
-            )
-            row = cur.fetchone()
+            with self._lock:
+                cur = self.conn.execute(
+                    "SELECT MAX(mtime) FROM chunks WHERE path = ?", (rel,)
+                )
+                row = cur.fetchone()
             if row and row[0] is not None and row[0] >= mtime:
                 continue  # unchanged since last index
 
-            self.conn.execute("DELETE FROM chunks WHERE path = ?", (rel,))
             chunks = _smart_chunk_file(f, chunk_lines, overlap)
             if not chunks:
+                with self._lock:
+                    self.conn.execute("DELETE FROM chunks WHERE path = ?", (rel,))
+                    self.conn.commit()
                 continue
+
             texts = [c[2] for c in chunks]
-            embeddings = self.client.embed(texts)
-            for (start, end, content), emb in zip(chunks, embeddings):
-                vec = np.array(emb, dtype=np.float32).tobytes()
-                self.conn.execute(
-                    "INSERT INTO chunks (path, start_line, end_line, content, embedding, mtime) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (rel, start, end, content, vec, mtime),
-                )
-                written += 1
-        self.conn.commit()
+            embeddings = self.client.embed(texts)  # network call - deliberately outside the lock
+
+            with self._lock:
+                self.conn.execute("DELETE FROM chunks WHERE path = ?", (rel,))
+                for (start, end, content), emb in zip(chunks, embeddings):
+                    vec = np.array(emb, dtype=np.float32).tobytes()
+                    self.conn.execute(
+                        "INSERT INTO chunks (path, start_line, end_line, content, embedding, mtime) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (rel, start, end, content, vec, mtime),
+                    )
+                    written += 1
+                self.conn.commit()
         return written
 
     def search(self, query: str, top_k: int = 8) -> list[dict]:
-        q_emb = np.array(self.client.embed([query])[0], dtype=np.float32)
+        q_emb = np.array(self.client.embed([query])[0], dtype=np.float32)  # network call, outside the lock
         if q_emb.size == 0:
             return []
         q_norm = q_emb / (np.linalg.norm(q_emb) + 1e-8)
 
-        rows = self.conn.execute(
-            "SELECT path, start_line, end_line, content, embedding FROM chunks"
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT path, start_line, end_line, content, embedding FROM chunks"
+            ).fetchall()
+
         scored = []
         for path, start, end, content, emb_blob in rows:
             vec = np.frombuffer(emb_blob, dtype=np.float32)
@@ -248,6 +263,7 @@ class CodebaseIndex:
         return scored[:top_k]
 
     def stats(self) -> dict:
-        n = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        files = self.conn.execute("SELECT COUNT(DISTINCT path) FROM chunks").fetchone()[0]
+        with self._lock:
+            n = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            files = self.conn.execute("SELECT COUNT(DISTINCT path) FROM chunks").fetchone()[0]
         return {"chunks": n, "files": files}
