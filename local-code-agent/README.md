@@ -91,6 +91,38 @@ launch-agent.bat C:\path\to\my-project     REM skip the folder prompt
 
 All three will tell you clearly if setup hasn't been run yet, instead of failing silently.
 
+## GUI (an app window, like a local Copilot)
+
+There's also a graphical version, for anyone who'd rather not live in a terminal: a chat panel,
+clickable Allow/Deny/Session buttons for every permission prompt instead of typing y/n, and
+colored diffs shown inline. It's a small local web app (Flask backend + plain HTML/CSS/JS
+frontend, no framework, no CDN calls) wrapped in a native window - same underlying agent, same
+config.yaml, same permission model, just a different front end.
+
+**Run it:**
+```bash
+pip install -e .              # already includes Flask
+pip install pywebview         # optional - gives a real app window; skipped, it opens in your browser instead
+local-agent-gui
+```
+
+Or use the launcher for your OS, same pattern as the terminal one:
+```
+launch-agent-gui.bat C:\path\to\my-project      REM Windows
+.\launch-agent-gui.ps1 -ProjectPath C:\path\to\my-project
+./launch-agent-gui.sh /path/to/my-project        # Mac/Linux
+```
+
+**How permission prompts work here**: instead of a terminal question, you'll see a bordered card
+inline in the chat with the file/command/diff shown and three buttons - Allow once, Allow for
+this session, Deny. Nothing happens until you click one, exactly like the terminal version's
+`y`/`session`/`n`.
+
+**Note on `pywebview`**: without it, `local-agent-gui` still works perfectly - it just opens in
+your default browser as a tab instead of its own window. It's a one-line install if you want the
+dedicated-window feel; there's no functional difference either way, both talk to the same local
+server on `127.0.0.1` and nothing leaves your machine.
+
 ## Built for web app work specifically
 
 A few tools exist mainly because "build me a web app" has needs plain coding doesn't:
@@ -239,3 +271,7 @@ Two further upgrades now built in:
   stall, it may not have emitted a valid tool call - try rephrasing your request more concretely.
 - Scanned/image-only PDFs aren't read as text - export the page as an image and use `read_image`
   instead, since the model can see images directly.
+- **GUI-specific**: the chat panel renders bold, inline code, and fenced code blocks, but not
+  full markdown (no lists/headers/tables yet); the Flask dev server it runs on is fine for this
+  single-user local use case but isn't hardened for exposure beyond `127.0.0.1`, so don't
+  port-forward it.
