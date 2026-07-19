@@ -98,9 +98,10 @@ class PermissionManager:
     def _write_pre_allowed(self, path: Path) -> bool:
         return self._session_allow_all_writes or f"write:{path}" in self._session_allow_paths
 
-    def request_write_batch(self, paths: list[Path]) -> bool:
+    def request_write_batch(self, paths: list[Path], diffs: list[str] | None = None) -> bool:
         """One approval covering several files at once (e.g. scaffolding a new project).
-        Callers must render all previews/diffs to the user before calling this."""
+        Callers must render all previews/diffs to the user before calling this in CLI mode;
+        `diffs` is accepted (and used by the GUI's permission manager) for interface parity."""
         for p in paths:
             if not self._within_allowed_roots(p):
                 console.print(f"[red]Blocked:[/red] {p} is outside the allowed project directory.")
