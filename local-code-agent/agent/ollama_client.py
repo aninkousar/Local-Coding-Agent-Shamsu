@@ -28,18 +28,67 @@ class OllamaClient:
         self.enable_thinking = enable_thinking
         self.keep_alive = keep_alive
         self.embed_batch_size = embed_batch_size
+        # Windows in particular can resolve "localhost" to IPv6 (::1) while Ollama
+        # only listens on IPv4 (127.0.0.1), or vice versa - a well-documented cause
+        # of connections failing 100% of the time even though Ollama is running fine.
+        # We cache whichever address actually answers so we're not double-probing
+        # every call once we know which one works.
+        self._resolved_host: str | None = None
 
-    # -- health -------------------------------------------------------------
-    def ping(self) -> bool:
+    def _alt_host(self, host: str) -> str | None:
+        if "localhost" in host:
+            return host.replace("localhost", "127.0.0.1")
+        if "127.0.0.1" in host:
+            return host.replace("127.0.0.1", "localhost")
+        return None
+
+    def _probe(self, host: str) -> bool:
         try:
-            r = requests.get(f"{self.host}/api/tags", timeout=3)
+            r = requests.get(f"{host}/api/tags", timeout=2)
             return r.status_code == 200
         except requests.RequestException:
             return False
 
+    def _get_working_host(self) -> str | None:
+        """Returns a host Ollama is actually answering on right now, or None if
+        neither the configured address nor its localhost/127.0.0.1 counterpart work."""
+        if self._resolved_host and self._probe(self._resolved_host):
+            return self._resolved_host
+        candidates = [self.host]
+        alt = self._alt_host(self.host)
+        if alt:
+            candidates.append(alt)
+        for candidate in candidates:
+            if self._probe(candidate):
+                self._resolved_host = candidate
+                return candidate
+        self._resolved_host = None
+        return None
+
+    def _unreachable_error(self, detail: str = "") -> OllamaError:
+        alt = self._alt_host(self.host)
+        tried = f"{self.host}" + (f" and {alt}" if alt else "")
+        return OllamaError(
+            f"Could not reach a local Ollama server (tried {tried}).\n"
+            f"Checklist: (1) is Ollama actually running - not just a closed `ollama run` "
+            f"session, but the background service/tray app, or `ollama serve` in its own "
+            f"window; (2) on Windows, check Windows Defender Firewall isn't silently "
+            f"blocking port 11434 (it doesn't do this by default, but security software "
+            f"sometimes adds a rule); (3) check nothing set the OLLAMA_HOST environment "
+            f"variable to something unexpected."
+            + (f"\nDetails: {detail}" if detail else "")
+        )
+
+    # -- health -------------------------------------------------------------
+    def ping(self) -> bool:
+        return self._get_working_host() is not None
+
     def has_model(self, name: str) -> bool:
+        host = self._get_working_host()
+        if not host:
+            return False
         try:
-            r = requests.get(f"{self.host}/api/tags", timeout=5)
+            r = requests.get(f"{host}/api/tags", timeout=5)
             r.raise_for_status()
             names = [m.get("name", "") for m in r.json().get("models", [])]
             return any(n == name or n.startswith(name.split(":")[0]) for n in names)
@@ -52,15 +101,15 @@ class OllamaClient:
         """Single non-streaming chat turn. Returns the raw `message` dict from Ollama,
         which may include `content` and/or `tool_calls`.
         """
+        host = self._get_working_host()
+        if not host:
+            raise self._unreachable_error()
         payload = self._build_chat_payload(messages, tools, images_b64, stream=False)
         try:
-            r = requests.post(f"{self.host}/api/chat", json=payload, timeout=600)
+            r = requests.post(f"{host}/api/chat", json=payload, timeout=600)
             r.raise_for_status()
         except requests.RequestException as e:
-            raise OllamaError(
-                f"Could not reach local Ollama server at {self.host}. "
-                f"Is it running? (`ollama serve`). Details: {e}"
-            )
+            raise self._unreachable_error(str(e))
         data = r.json()
         if "message" not in data:
             raise OllamaError(f"Unexpected Ollama response: {data}")
@@ -75,11 +124,14 @@ class OllamaClient:
         Callers should print each "content" delta live, then use the final "done"
         event's accumulated content/tool_calls exactly like the non-streaming chat().
         """
+        host = self._get_working_host()
+        if not host:
+            raise self._unreachable_error()
         payload = self._build_chat_payload(messages, tools, images_b64, stream=True)
         full_content = []
         tool_calls: list[dict] = []
         try:
-            with requests.post(f"{self.host}/api/chat", json=payload, timeout=600, stream=True) as r:
+            with requests.post(f"{host}/api/chat", json=payload, timeout=600, stream=True) as r:
                 r.raise_for_status()
                 for line in r.iter_lines():
                     if not line:
@@ -95,10 +147,7 @@ class OllamaClient:
                     if chunk.get("done"):
                         break
         except requests.RequestException as e:
-            raise OllamaError(
-                f"Could not reach local Ollama server at {self.host}. "
-                f"Is it running? (`ollama serve`). Details: {e}"
-            )
+            raise self._unreachable_error(str(e))
         yield {"type": "done", "content": "".join(full_content), "tool_calls": tool_calls}
 
     def _build_chat_payload(self, messages: list[dict], tools: list[dict] | None,
@@ -134,19 +183,22 @@ class OllamaClient:
         """
         if not texts:
             return []
+        host = self._get_working_host()
+        if not host:
+            raise self._unreachable_error()
         out: list[list[float]] = []
         for i in range(0, len(texts), self.embed_batch_size):
             batch = texts[i:i + self.embed_batch_size]
             try:
                 r = requests.post(
-                    f"{self.host}/api/embed",
+                    f"{host}/api/embed",
                     json={"model": self.embed_model, "input": batch, "keep_alive": self.keep_alive},
                     timeout=180,
                 )
                 r.raise_for_status()
                 embeddings = r.json().get("embeddings", [])
             except requests.RequestException as e:
-                raise OllamaError(f"Embedding call failed: {e}")
+                raise self._unreachable_error(str(e))
             if len(embeddings) != len(batch):
                 raise OllamaError(
                     f"Embedding batch mismatch: sent {len(batch)} texts, got {len(embeddings)} vectors back."
