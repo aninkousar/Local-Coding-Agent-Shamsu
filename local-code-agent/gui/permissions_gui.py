@@ -61,6 +61,28 @@ class GuiPermissionManager:
             return True
         return False
 
+    def request_read_batch(self, paths: list[Path]) -> bool:
+        for p in paths:
+            if not self._within_allowed_roots(p):
+                events.push_event({"type": "blocked", "message": f"{p} is outside the allowed project directory."})
+                return False
+        if self._session_allow_all_reads:
+            return True
+        if all(str(p) in self._session_allow_paths for p in paths):
+            return True
+        listing = "\n".join(f"- {p}" for p in paths)
+        choice = self._ask("read_batch", f"Read these {len(paths)} files:\n{listing}")
+        if choice == "y":
+            return True
+        if choice == "always":
+            for p in paths:
+                self._session_allow_paths.add(str(p))
+            return True
+        if choice == "session":
+            self._session_allow_all_reads = True
+            return True
+        return False
+
     # -- file writes/edits --------------------------------------------------
     def _write_pre_allowed(self, path: Path) -> bool:
         return self._session_allow_all_writes or f"write:{path}" in self._session_allow_paths
