@@ -123,6 +123,24 @@ your default browser as a tab instead of its own window. It's a one-line install
 dedicated-window feel; there's no functional difference either way, both talk to the same local
 server on `127.0.0.1` and nothing leaves your machine.
 
+## Built for writing code efficiently
+
+A few tools and behaviors exist specifically to reduce wasted round-trips and catch mistakes
+before you have to:
+
+- **Auto syntax-check after every write_file/edit_file/scaffold_files.** Python files are
+  checked with the stdlib `ast` parser, JSON with `json.loads`, and JavaScript with `node --check`
+  if Node is installed. If something's broken, the model sees "⚠ Syntax check FAILED: ..." in
+  the *same turn* and is instructed to fix it immediately - not wait for you to notice and report
+  it next message. Other file types aren't checked this way (nothing is claimed about them).
+- **`list_symbols`** - a near-instant function/class map of a file (via the same AST/regex logic
+  the codebase index uses), so the model can survey an unfamiliar file's structure before
+  deciding whether it's worth reading in full.
+- **`read_file` line ranges** - pass `start_line`/`end_line` to read just the relevant section of
+  a large file instead of the whole thing.
+- **`read_files`** (plural) - read several related files in one batch/one approval, instead of
+  separate `read_file` calls and separate prompts for each.
+
 ## Built for web app work specifically
 
 A few tools exist mainly because "build me a web app" has needs plain coding doesn't:
