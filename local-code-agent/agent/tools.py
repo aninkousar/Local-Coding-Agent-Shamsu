@@ -1,5 +1,8 @@
 from __future__ import annotations
+import ast
 import fnmatch
+import json
+import shutil
 import subprocess
 import threading
 import webbrowser
@@ -12,7 +15,7 @@ from rich.console import Console
 
 from .permissions import PermissionManager
 from .diffs import make_unified_diff, render_diff, apply_edit
-from .indexer import CodebaseIndex
+from .indexer import CodebaseIndex, _STRUCTURE_MARKERS
 from . import doc_reader
 from .ollama_client import OllamaClient
 
@@ -30,6 +33,49 @@ class _RunningProcess:
     proc: subprocess.Popen
     output: deque
     command: str
+
+
+def _check_syntax(path: Path) -> tuple[bool, str | None]:
+    """Best-effort, zero-dependency syntax check run right after a write/edit, so a
+    broken change surfaces in the SAME turn instead of waiting for the user to
+    notice and report it next message. Returns (checked, error):
+    checked=False means this file type isn't verified this way (nothing to report).
+    checked=True, error=None means it parsed cleanly.
+    checked=True, error=<msg> means a real problem was found.
+    """
+    ext = path.suffix.lower()
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False, None
+
+    if ext == ".py":
+        try:
+            ast.parse(text)
+            return True, None
+        except SyntaxError as e:
+            return True, f"Python syntax error at line {e.lineno}: {e.msg}"
+
+    if ext == ".json":
+        try:
+            json.loads(text)
+            return True, None
+        except json.JSONDecodeError as e:
+            return True, f"JSON syntax error at line {e.lineno}: {e.msg}"
+
+    if ext in (".js", ".mjs", ".cjs"):
+        node = shutil.which("node")
+        if not node:
+            return False, None
+        try:
+            proc = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None
+        if proc.returncode != 0:
+            return True, f"JS syntax error: {proc.stderr.strip()[:300]}"
+        return True, None
+
+    return False, None
 
 
 TOOL_SCHEMAS = [
@@ -52,7 +98,41 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the full contents of a text/code file in the project, with line numbers.",
+            "description": "Read a text/code file in the project, with line numbers. For a large file, pass start_line/end_line to read just the relevant section instead of the whole thing - cheaper and faster than reading everything.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path from project root."},
+                    "start_line": {"type": "integer", "description": "Optional: first line to read (1-indexed)."},
+                    "end_line": {"type": "integer", "description": "Optional: last line to read (inclusive)."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_files",
+            "description": "Read several files in one batch instead of separate read_file calls - use this when you need to look at multiple related files before making a coordinated change. One approval covers the whole batch.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Relative paths from project root.",
+                    },
+                },
+                "required": ["paths"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_symbols",
+            "description": "Quickly list the function/class/method names and line numbers in a file, without reading the whole thing - near-instant, no search index needed. Use this to get a map of an unfamiliar or large file before deciding what to read_file in full.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "Relative path from project root."}},
@@ -290,15 +370,69 @@ class ToolRegistry:
             entries.append(str(p.relative_to(self.root)) + marker)
         return ToolResult(text="\n".join(entries) or "(empty)")
 
-    def _tool_read_file(self, path: str) -> ToolResult:
+    def _tool_read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> ToolResult:
         target = self._resolve(path)
         if not self.perm.request_read(target):
             return ToolResult(text="Permission denied by user.")
         if not target.exists():
             return ToolResult(text=f"File does not exist: {path}")
-        text = target.read_text(encoding="utf-8", errors="replace")
-        numbered = "\n".join(f"{i+1:>5}\t{line}" for i, line in enumerate(text.splitlines()))
-        return ToolResult(text=numbered)
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        total = len(lines)
+        s = max(1, start_line) if start_line else 1
+        e = min(total, end_line) if end_line else total
+        if s > total:
+            return ToolResult(text=f"start_line {s} is past the end of the file ({total} lines total).")
+        numbered = "\n".join(f"{i:>5}\t{lines[i - 1]}" for i in range(s, e + 1))
+        header = f"(showing lines {s}-{e} of {total} total)\n" if (s != 1 or e != total) else ""
+        return ToolResult(text=header + numbered)
+
+    def _tool_read_files(self, paths: list[str]) -> ToolResult:
+        if not paths:
+            return ToolResult(text="No paths given.")
+        targets = [self._resolve(p) for p in paths]
+        if not self.perm.request_read_batch(targets):
+            return ToolResult(text="Permission denied by user.")
+        blocks = []
+        for p, target in zip(paths, targets):
+            if not target.exists():
+                blocks.append(f"--- {p} ---\n(does not exist)")
+                continue
+            text = target.read_text(encoding="utf-8", errors="replace")
+            numbered = "\n".join(f"{i + 1:>5}\t{line}" for i, line in enumerate(text.splitlines()))
+            blocks.append(f"--- {p} ---\n{numbered}")
+        return ToolResult(text="\n\n".join(blocks))
+
+    def _tool_list_symbols(self, path: str) -> ToolResult:
+        target = self._resolve(path)
+        if not self.perm.request_read(target):
+            return ToolResult(text="Permission denied by user.")
+        if not target.exists():
+            return ToolResult(text=f"File does not exist: {path}")
+
+        if target.suffix.lower() == ".py":
+            try:
+                source = target.read_text(encoding="utf-8", errors="ignore")
+                tree = ast.parse(source)
+            except SyntaxError as e:
+                return ToolResult(text=f"Could not parse (syntax error at line {e.lineno}): {e.msg}")
+            entries = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    entries.append((node.lineno, f"class {node.name}"))
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                    entries.append((node.lineno, f"{prefix} {node.name}(...)"))
+            entries.sort(key=lambda t: t[0])
+            lines_out = [f"{ln}: {label}" for ln, label in entries]
+            return ToolResult(text="\n".join(lines_out) or "(no functions or classes found)")
+
+        try:
+            lines = target.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return ToolResult(text="Could not read file.")
+        hits = [f"{i + 1}: {line.strip()}" for i, line in enumerate(lines) if any(p.match(line) for p in _STRUCTURE_MARKERS)]
+        return ToolResult(text="\n".join(hits) or
+                           "No recognizable function/class definitions found this way for this file type - try read_file instead.")
 
     def _tool_read_document(self, path: str) -> ToolResult:
         target = self._resolve(path)
@@ -358,7 +492,11 @@ class ToolRegistry:
         if not self.perm.request_write(target, preview=diff):
             return ToolResult(text="Permission denied by user. File not changed.")
         apply_edit(target, content)
-        return ToolResult(text=f"Wrote {path} ({len(content.splitlines())} lines).")
+        result = f"Wrote {path} ({len(content.splitlines())} lines)."
+        checked, error = _check_syntax(target)
+        if checked:
+            result += f"\n⚠ Syntax check FAILED: {error} - fix this before moving on." if error else "\nSyntax check: OK"
+        return ToolResult(text=result)
 
     def _tool_edit_file(self, path: str, old_str: str, new_str: str) -> ToolResult:
         target = self._resolve(path)
@@ -377,7 +515,11 @@ class ToolRegistry:
         if not self.perm.request_write(target, preview=diff):
             return ToolResult(text="Permission denied by user. File not changed.")
         apply_edit(target, new_content)
-        return ToolResult(text=f"Edited {path}.")
+        result = f"Edited {path}."
+        checked, error = _check_syntax(target)
+        if checked:
+            result += f"\n⚠ Syntax check FAILED: {error} - fix this before moving on." if error else "\nSyntax check: OK"
+        return ToolResult(text=result)
 
     def _tool_run_command(self, command: str) -> ToolResult:
         if not self.perm.request_command(command):
@@ -432,8 +574,17 @@ class ToolRegistry:
 
         for target, path, content, _ in previews:
             apply_edit(target, content)
-        return ToolResult(text=f"Created/updated {len(previews)} files: " +
-                                ", ".join(p for _, p, _, _ in previews))
+
+        issues = []
+        for target, path, content, _ in previews:
+            checked, error = _check_syntax(target)
+            if checked and error:
+                issues.append(f"{path}: {error}")
+
+        result = f"Created/updated {len(previews)} files: " + ", ".join(p for _, p, _, _ in previews)
+        if issues:
+            result += "\n⚠ Syntax check FAILED for:\n" + "\n".join(issues) + "\nFix these before moving on."
+        return ToolResult(text=result)
 
     def _tool_start_dev_server(self, command: str) -> ToolResult:
         if not self.perm.request_command(command):
