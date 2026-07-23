@@ -69,6 +69,29 @@ class PermissionManager:
             return True
         return False
 
+    def request_read_batch(self, paths: list[Path]) -> bool:
+        """One approval covering several files at once (e.g. reading several related
+        files before a coordinated change)."""
+        for p in paths:
+            if not self._within_allowed_roots(p):
+                console.print(f"[red]Blocked:[/red] {p} is outside the allowed project directory.")
+                return False
+        if self._session_allow_all_reads:
+            return True
+        if all(str(p) in self._session_allow_paths for p in paths):
+            return True
+        choice = self._ask(f"Read these {len(paths)} files?\n" + "\n".join(f"  - {p}" for p in paths))
+        if choice == "y":
+            return True
+        if choice == "always":
+            for p in paths:
+                self._session_allow_paths.add(str(p))
+            return True
+        if choice == "session":
+            self._session_allow_all_reads = True
+            return True
+        return False
+
     # -- file writes/edits --------------------------------------------------
     def request_write(self, path: Path, preview: str = "") -> bool:
         path = Path(path)
