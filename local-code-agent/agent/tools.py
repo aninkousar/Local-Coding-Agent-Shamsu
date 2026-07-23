@@ -82,6 +82,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "update_plan",
+            "description": "Record or update your step-by-step plan for the current task. Call this FIRST, before any other tool, for any request that will take more than one small action - break the work into a short numbered list of concrete segments. Call it again (re-sending the FULL list with updated statuses) whenever you finish a step or the plan needs to change. Skip this entirely for simple one-step requests (answering a question, reading one file, a single small edit).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "description": "The full current plan, in order. Always re-send every step, not just the ones that changed.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {"type": "string", "description": "A short, concrete description of this step."},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                            },
+                            "required": ["description", "status"],
+                        },
+                    },
+                },
+                "required": ["steps"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_directory",
             "description": "List files and folders under a path in the project (non-recursive unless recursive=true).",
             "parameters": {
@@ -330,6 +355,7 @@ class ToolRegistry:
         self.index_cfg = index_cfg
         self._processes: dict[str, _RunningProcess] = {}
         self._process_counter = 0
+        self._current_plan: list[dict] = []
 
     def shutdown(self) -> None:
         """Stop any background dev servers still running when the agent exits."""
@@ -357,6 +383,18 @@ class ToolRegistry:
             return ToolResult(text=f"Error running {name}: {e}")
 
     # -- implementations --------------------------------------------------------
+    def _tool_update_plan(self, steps: list[dict]) -> ToolResult:
+        if not steps:
+            return ToolResult(text="No steps given - a plan needs at least one step.")
+        self._current_plan = steps
+        lines = []
+        for i, s in enumerate(steps, 1):
+            desc = s.get("description", "")
+            status = s.get("status", "pending")
+            marker = {"completed": "[x]", "in_progress": "[~]"}.get(status, "[ ]")
+            lines.append(f"{marker} {i}. {desc}")
+        return ToolResult(text="\n".join(lines))
+
     def _tool_list_directory(self, path: str = ".", recursive: bool = False) -> ToolResult:
         target = self._resolve(path)
         if not self.perm.request_read(target):
