@@ -1,12 +1,27 @@
 from __future__ import annotations
 import json
 from rich.console import Console
+from rich.panel import Panel
 
 from .ollama_client import OllamaClient, OllamaError
 from .tools import ToolRegistry, TOOL_SCHEMAS
 from .memory import ConversationMemory
 
 console = Console()
+
+
+def _render_plan(steps: list[dict]) -> None:
+    lines = []
+    for i, s in enumerate(steps, 1):
+        desc = s.get("description", "")
+        status = s.get("status", "pending")
+        if status == "completed":
+            lines.append(f"[green]✔[/green] [dim strike]{i}. {desc}[/dim strike]")
+        elif status == "in_progress":
+            lines.append(f"[yellow]▶[/yellow] [bold]{i}. {desc}[/bold]")
+        else:
+            lines.append(f"[dim]○ {i}. {desc}[/dim]")
+    console.print(Panel("\n".join(lines), title="Plan", border_style="cyan", expand=False))
 
 
 class AgentLoop:
@@ -61,7 +76,10 @@ class AgentLoop:
                     except json.JSONDecodeError:
                         raw_args = {}
 
-                console.print(f"[dim]→ tool call: {name}({json.dumps(raw_args)[:200]})[/dim]")
+                if name == "update_plan":
+                    _render_plan(raw_args.get("steps", []))
+                else:
+                    console.print(f"[dim]→ tool call: {name}({json.dumps(raw_args)[:200]})[/dim]")
                 result = self.tools.execute(name, raw_args)
 
                 # Feed the tool result back into the conversation
