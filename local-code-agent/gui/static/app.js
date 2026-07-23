@@ -12,6 +12,7 @@
   let currentTextEl = null;
   let currentRawText = "";
   let turnInFlight = false;
+  let planCardEl = null;
 
   // ---------- helpers ----------
 
@@ -188,6 +189,33 @@
     scrollToBottom();
   }
 
+  function onPlanUpdate(steps) {
+    if (!planCardEl) {
+      const body = ensureTurn();
+      const tpl = document.getElementById("tpl-plan");
+      const node = tpl.content.cloneNode(true);
+      planCardEl = node.querySelector(".plan-card");
+      body.appendChild(node);
+      currentTextEl = null;
+      currentRawText = "";
+    }
+
+    const stepsContainer = planCardEl.querySelector(".plan-steps");
+    stepsContainer.innerHTML = "";
+    const stepTpl = document.getElementById("tpl-plan-step");
+    steps.forEach((s, i) => {
+      const stepNode = stepTpl.content.cloneNode(true);
+      const stepEl = stepNode.querySelector(".plan-step");
+      const status = s.status || "pending";
+      stepEl.classList.add(status);
+      const icon = status === "completed" ? "✔" : status === "in_progress" ? "▶" : "○";
+      stepEl.querySelector(".plan-step-icon").textContent = icon;
+      stepEl.querySelector(".plan-step-desc").textContent = `${i + 1}. ${s.description || ""}`;
+      stepsContainer.appendChild(stepNode);
+    });
+    scrollToBottom();
+  }
+
   // ---------- SSE ----------
 
   function onReindexProgress(current, total) {
@@ -220,6 +248,7 @@
         case "tool_result": onToolResult(ev.name, ev.text); break;
         case "permission_request": onPermissionRequest(ev); break;
         case "status": onStatus(ev.message, false); break;
+        case "plan_update": onPlanUpdate(ev.steps || []); break;
         case "blocked": onStatus(ev.message, true); break;
         case "error": onStatus(ev.message, true); break;
         case "turn_complete": endTurn(); break;
