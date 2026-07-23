@@ -123,6 +123,22 @@ your default browser as a tab instead of its own window. It's a one-line install
 dedicated-window feel; there's no functional difference either way, both talk to the same local
 server on `127.0.0.1` and nothing leaves your machine.
 
+## Plan-first workflow for multi-step tasks
+
+For anything more than a single small action, the agent is instructed to call `update_plan`
+*before* touching any files - breaking the request into a short numbered list of concrete
+segments - then work through them one at a time, updating the plan's statuses as it goes.
+
+- **In the terminal**, this shows as a distinct bordered "Plan" panel with a checklist
+  (`✔`/`▶`/`○`), separate from the normal dim tool-call lines.
+- **In the GUI**, it's a persistent checklist card that updates *in place* as steps complete,
+  rather than a wall of repeated messages.
+
+This exists because a small model drifts more easily on multi-step work than a large one - an
+explicit, visible plan gives it (and you) something concrete to check progress against, and lets
+you catch a wrong approach after step one instead of after step five. It's skipped automatically
+for simple one-step requests, so you won't see a plan for "what does this function do."
+
 ## Built for writing code efficiently
 
 A few tools and behaviors exist specifically to reduce wasted round-trips and catch mistakes
