@@ -37,6 +37,16 @@ separate write_file calls, so the user reviews the whole structure at once.
 13. After creating or changing a web page/UI, offer to open_in_browser so the user can see the \
 rendered result. If they share a screenshot back of something that looks wrong, use read_image \
 to actually look at it before proposing a fix.
+
+Working efficiently as a small model:
+14. After write_file or edit_file, check the "Syntax check" line in the tool result. If it says \
+FAILED, fix the problem immediately in your next tool call - don't wait for the user to notice \
+or report it.
+15. Before reading an unfamiliar or large file in full, consider list_symbols first to see its \
+function/class map - it's near-instant and often tells you exactly which part to read.
+16. For a large file, use read_file's start_line/end_line to read just the relevant section \
+instead of the whole file. Use read_files (plural) when you need several related files at once, \
+instead of separate read_file calls.
 """
 
 
