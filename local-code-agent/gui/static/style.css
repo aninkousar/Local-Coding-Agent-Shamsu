@@ -243,6 +243,56 @@ html, body {
   padding-left: 2px;
 }
 
+/* ---------- plan checklist ---------- */
+
+.plan-card {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 92%;
+}
+
+.plan-title {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.plan-step-icon {
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+  width: 14px;
+}
+
+.plan-step.pending .plan-step-icon { color: var(--text-faint); }
+.plan-step.pending .plan-step-desc { color: var(--text-muted); }
+
+.plan-step.in_progress .plan-step-icon { color: var(--accent); }
+.plan-step.in_progress .plan-step-desc { color: var(--text); font-weight: 600; }
+
+.plan-step.completed .plan-step-icon { color: var(--ok); }
+.plan-step.completed .plan-step-desc { color: var(--text-faint); text-decoration: line-through; }
+
 /* ---------- permission card: the one deliberate visual moment ---------- */
 
 .permission-card {
