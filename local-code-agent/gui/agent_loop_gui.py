@@ -59,11 +59,16 @@ class GuiAgentLoop:
                     except json.JSONDecodeError:
                         raw_args = {}
 
-                events.push_event({"type": "tool_call", "name": name, "args": raw_args})
+                if name == "update_plan":
+                    events.push_event({"type": "plan_update", "steps": raw_args.get("steps", [])})
+                else:
+                    events.push_event({"type": "tool_call", "name": name, "args": raw_args})
+
                 result = self.tools.execute(name, raw_args)
 
                 shown = result.text if len(result.text) < 4000 else result.text[:4000] + "\n...(truncated)"
-                events.push_event({"type": "tool_result", "name": name, "text": shown})
+                if name != "update_plan":
+                    events.push_event({"type": "tool_result", "name": name, "text": shown})
                 self.memory.add("tool", f"[{name}] {shown}")
 
                 if result.image_b64:
