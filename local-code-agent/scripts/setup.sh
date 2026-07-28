@@ -14,7 +14,7 @@ echo "Starting Ollama server in the background (if not already running)..."
 sleep 2
 
 echo "Pulling models (one-time, needs internet just for this step)..."
-ollama pull qwen3.5:4b
+ollama pull qwen3.5:9b
 ollama pull nomic-embed-text
 
 echo "Setting up Python environment..."
