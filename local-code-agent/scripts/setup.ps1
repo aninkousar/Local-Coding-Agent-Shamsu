@@ -10,7 +10,7 @@ Start-Process -NoNewWindow ollama -ArgumentList "serve" -ErrorAction SilentlyCon
 Start-Sleep -Seconds 2
 
 Write-Host "Pulling models (one-time, needs internet just for this step)..."
-ollama pull qwen3.5:4b
+ollama pull qwen3.5:9b
 ollama pull nomic-embed-text
 
 Write-Host "Setting up Python environment..."
