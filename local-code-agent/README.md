@@ -1,22 +1,39 @@
 # Local Code Agent
 
-A fully offline, permission-gated coding agent shaped like Claude Code, built on a model
-small enough to run on an 8GB-RAM machine with no GPU.
+A fully offline, permission-gated coding agent shaped like Claude Code, running on a
+9-billion-parameter local model - a step up in capability from the original 4B design, at the
+cost of a genuinely tight fit on an 8GB-RAM, no-GPU machine. Read the RAM callout below before
+you commit to this size.
 
 ## Read this first: what to actually expect
 
-This uses a **4-billion-parameter local model** (Qwen3.5-4B). That is roughly two orders of
-magnitude smaller than the models behind Claude Code. Concretely, that means:
+This uses **Qwen3.5-9B**, still roughly an order of magnitude smaller than the models behind
+Claude Code. Concretely, that means:
 
-- **It's genuinely useful for**: reading a codebase and explaining it, small-to-medium focused
-  edits, scaffolding a new file/module from a clear spec, writing boilerplate, answering "what
-  does this code do", reading a requirements doc or a mockup image and turning it into a first
-  draft.
-- **It will struggle with**: large multi-file refactors, subtle bugs, ambiguous requirements it
-  has to infer, anything requiring holding a lot of context in its "head" at once.
+- **It's genuinely useful for**: everything the 4B version was good at, plus noticeably more
+  reliable multi-file work and better judgment on ambiguous requirements - reading a codebase and
+  explaining it, focused edits, scaffolding a new module from a spec, writing boilerplate, reading
+  a requirements doc or mockup image and turning it into a first draft.
+- **It will still struggle with**: large-scale refactors, subtle bugs, and anything that needs a
+  lot of context held in its "head" at once - a 9B model is meaningfully better than 4B, not a
+  different league.
 - **Work in small steps.** Give it one file or one feature at a time. Review every diff. Treat it
-  like a fast, tireless, occasionally-wrong junior developer who never gets tired of your
-  corrections - not a drop-in replacement for a senior engineer.
+  like a fast, tireless junior developer who never gets tired of your corrections - not a
+  drop-in replacement for a senior engineer.
+
+**RAM callout - read this if you're on 8GB with no GPU**: Qwen3.5-9B needs roughly 5-7GB just for
+the model weights at Q4 quantization, against a commonly recommended minimum of ~12GB total
+system RAM. On an 8GB machine this leaves very little headroom for the OS and everything else -
+expect it to be noticeably slower than 4B was, and there's a real chance of swapping or
+instability, especially with other apps open. `context_window` has already been trimmed to 4096
+(from 8192) in `config.yaml` to claw back some of that headroom, but if it's still too rough,
+dropping back to 4B is a one-line change:
+```yaml
+# in config.yaml
+chat_model: "qwen3.5:4b"
+```
+(pull it first if you don't already have it: `ollama pull qwen3.5:4b`). No other files need to
+change - everything else reads the model name from this one config value.
 
 Anthropic doesn't make this model or endorse this specific configuration - this is a scaffold
 built from your requirements, using open-weight models you download and run yourself.
@@ -56,7 +73,7 @@ agent/ollama_client.py    the ONLY network code in this repo - talks to localhos
 Ollama (local server)
     │
     ▼
-qwen3.5:4b (chat+vision, ~2.5GB RAM at Q4) + nomic-embed-text (~50MB, for codebase search)
+qwen3.5:9b (chat+vision, ~5-7GB RAM at Q4) + nomic-embed-text (~50MB, for codebase search)
 ```
 
 Why Ollama instead of raw llama.cpp: it packages the GGUF weights, quantization, and the vision
@@ -171,8 +188,8 @@ A few tools exist mainly because "build me a web app" has needs plain coding doe
   browser so you can see the actual rendered result immediately (stdlib only, no new dependency).
 
 The system prompt also nudges the model toward plain HTML/CSS/JS or server-rendered templates
-(e.g. Flask+Jinja2) by default, rather than framework/bundler-heavy stacks - a 4B model is far
-more reliable on the simpler stack unless you specifically ask for something else.
+(e.g. Flask+Jinja2) by default, rather than framework/bundler-heavy stacks - a model this size is
+far more reliable on the simpler stack unless you specifically ask for something else.
 
 ## Setup
 
@@ -196,8 +213,8 @@ cd local-code-agent
 ### Manual setup (any OS)
 ```bash
 # 1. Install Ollama: https://ollama.com/download
-# 2. Pull the two local models (one-time, ~3GB total download)
-ollama pull qwen3.5:4b
+# 2. Pull the two local models (one-time, ~6-7GB total download)
+ollama pull qwen3.5:9b
 ollama pull nomic-embed-text
 # 3. Python deps
 pip install -r requirements.txt
@@ -270,7 +287,7 @@ genuinely worth trying, all are optional:
   the conversation's context cache as sessions get longer. Set both as environment variables
   before starting `ollama serve` (on Windows: System Settings → Environment Variables, then
   restart Ollama). The benefit is most documented on GPU; on CPU-only it's still worth trying,
-  but confirm it actually helped rather than assuming - check `ollama show qwen3.5:4b` or the
+  but confirm it actually helped rather than assuming - check `ollama show qwen3.5:9b` or the
   server log after setting it.
 - **Context caching happens automatically**: Ollama/llama.cpp reuse the already-processed part of
   a conversation (like the system prompt) instead of reprocessing it every turn, as long as
@@ -301,7 +318,7 @@ Two further upgrades now built in:
 - The semantic index chunks Python by real AST structure and other languages by a regex
   heuristic (not a real parser) - good at "find code related to X," but not immune to
   misfiring on unusual code formatting in non-Python files.
-- Tool-calling reliability on a 4B model is good but not perfect; if the agent seems to loop or
+- Tool-calling reliability at this size is good but not perfect; if the agent seems to loop or
   stall, it may not have emitted a valid tool call - try rephrasing your request more concretely.
 - Scanned/image-only PDFs aren't read as text - export the page as an image and use `read_image`
   instead, since the model can see images directly.
