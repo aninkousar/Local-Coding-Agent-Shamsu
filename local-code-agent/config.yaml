@@ -3,9 +3,12 @@
 
 ollama:
   host: "http://localhost:11434"
-  chat_model: "qwen3.5:4b"        # main coding + vision model
+  chat_model: "qwen3.5:9b"          # main coding + vision model - a step up from 4B, tight
+                                     # fit on 8GB RAM with no dedicated GPU. If it's too slow or
+                                     # unstable, drop back to "qwen3.5:4b" (see README).
   embed_model: "nomic-embed-text"  # tiny embedding model used for codebase search
-  context_window: 8192             # keep modest on CPU-only 8GB boxes; raise if you have headroom
+  context_window: 4096             # trimmed from 8192: 9B needs more RAM for weights alone, so
+                                    # a smaller KV cache helps leave headroom on an 8GB machine.
   temperature: 0.3
   enable_thinking: false           # qwen3.5 small series: true = better reasoning, slower
   keep_alive: "30m"                # keeps the model loaded between turns - avoids reload
