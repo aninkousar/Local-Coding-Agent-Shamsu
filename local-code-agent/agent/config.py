@@ -26,7 +26,7 @@ class Config:
 
     @property
     def chat_model(self) -> str:
-        return self.raw.get("ollama", {}).get("chat_model", "qwen3.5:4b")
+        return self.raw.get("ollama", {}).get("chat_model", "qwen3.5:9b")
 
     @property
     def embed_model(self) -> str:
@@ -34,7 +34,7 @@ class Config:
 
     @property
     def context_window(self) -> int:
-        return int(self.raw.get("ollama", {}).get("context_window", 8192))
+        return int(self.raw.get("ollama", {}).get("context_window", 4096))
 
     @property
     def temperature(self) -> float:
