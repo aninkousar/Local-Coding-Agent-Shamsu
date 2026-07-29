@@ -5,6 +5,8 @@ A fully offline, permission-gated coding agent shaped like Claude Code, running 
 cost of a genuinely tight fit on an 8GB-RAM, no-GPU machine. Read the RAM callout below before
 you commit to this size.
 
+See [CHANGELOG.md](CHANGELOG.md) for the full build history.
+
 ## Read this first: what to actually expect
 
 This uses **Qwen3.5-9B**, still roughly an order of magnitude smaller than the models behind
@@ -161,11 +163,31 @@ for simple one-step requests, so you won't see a plan for "what does this functi
 A few tools and behaviors exist specifically to reduce wasted round-trips and catch mistakes
 before you have to:
 
-- **Auto syntax-check after every write_file/edit_file/scaffold_files.** Python files are
-  checked with the stdlib `ast` parser, JSON with `json.loads`, and JavaScript with `node --check`
-  if Node is installed. If something's broken, the model sees "⚠ Syntax check FAILED: ..." in
-  the *same turn* and is instructed to fix it immediately - not wait for you to notice and report
-  it next message. Other file types aren't checked this way (nothing is claimed about them).
+- **Auto syntax-check after every write_file/edit_file/scaffold_files.** If something's broken,
+  the model sees "⚠ Syntax check FAILED: ..." in the *same turn* and is instructed to fix it
+  immediately - not wait for you to notice and report it next message.
+- **Deeper correctness checking, per language, using each ecosystem's own standard tool - not a
+  hand-rolled checker that would risk false positives:**
+
+  | Language | Tool used | What it catches |
+  |---|---|---|
+  | Python | `pyflakes` | undefined names, unused imports/variables, redefinition |
+  | JavaScript | `node --check` (syntax) + `eslint` (if installed) | syntax, plus undefined/unused variables |
+  | TypeScript | `tsc --noEmit` (only if `tsconfig.json` exists) | real type errors across the project |
+  | C | `gcc -fsyntax-only` | undeclared identifiers, type errors - not just parsing |
+  | C++ | `g++ -fsyntax-only` | same, C++-aware (e.g. catches assigning an `int` to a `std::string`) |
+  | Go | `go vet` | Go treats unused imports as a compile error, so this catches that plus more |
+  | Rust | `cargo check` (only if `Cargo.toml` exists) | full type-checking without producing a binary |
+  | Java | `javac` (compiles to a throwaway temp dir) | real compile errors - can false-positive on unresolved external/third-party dependencies |
+  | Ruby | `ruby -c` | syntax only - no deeper static analyzer is bundled by default |
+  | PHP | `php -l` | syntax only - same reasoning |
+
+  **Every single one of these is entirely optional and detected at runtime** - if a given tool
+  isn't installed on your machine, that check is silently skipped and nothing is claimed about
+  it (no false "OK"). None of this needs internet access beyond whatever one-time install you
+  choose to do yourself; `pyflakes` is the only one that's a Python package (already in
+  `requirements.txt`) - everything else is a normal system tool (compiler, runtime, etc.) you
+  either already have or can install independently of this project.
 - **`list_symbols`** - a near-instant function/class map of a file (via the same AST/regex logic
   the codebase index uses), so the model can survey an unfamiliar file's structure before
   deciding whether it's worth reading in full.
@@ -320,6 +342,12 @@ Two further upgrades now built in:
   misfiring on unusual code formatting in non-Python files.
 - Tool-calling reliability at this size is good but not perfect; if the agent seems to loop or
   stall, it may not have emitted a valid tool call - try rephrasing your request more concretely.
+- Every deeper "Code check" depends on a tool being installed on your machine (see the table
+  above) - if none of them are, you only get the syntax-level check, or nothing at all for
+  languages with no checker wired up (Swift, Kotlin, Scala, C#, and anything else not listed).
+  Java's check can false-positive on external/third-party dependencies it can't resolve outside
+  the project. None of these are hand-rolled - they all defer to each ecosystem's own standard
+  tool, so false positives should be rare, but they're not impossible.
 - Scanned/image-only PDFs aren't read as text - export the page as an image and use `read_image`
   instead, since the model can see images directly.
 - **GUI-specific**: the chat panel renders bold, inline code, and fenced code blocks, but not
