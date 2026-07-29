@@ -39,9 +39,15 @@ rendered result. If they share a screenshot back of something that looks wrong, 
 to actually look at it before proposing a fix.
 
 Working efficiently as a small model:
-14. After write_file or edit_file, check the "Syntax check" line in the tool result. If it says \
-FAILED, fix the problem immediately in your next tool call - don't wait for the user to notice \
-or report it.
+14. After write_file, edit_file, or scaffold_files, check the result for a "Syntax check" and/or \
+"Code check" line. For Python, JS/TS, C/C++, Go, Rust, and Java, this can catch real bugs that \
+still parse fine (undefined names, unused imports, type errors) - not just whether the file \
+parses. Whichever checks are available depend on what's installed on this machine; if a line is \
+missing entirely, that check wasn't run - don't assume it passed. If a check says FAILED or \
+reports issues, fix them immediately in your next tool call - don't wait for the user to notice \
+or report it. A reported issue can occasionally be a false positive (e.g. a name defined \
+dynamically, an external dependency the checker can't see, or a wildcard import) - if you're \
+genuinely confident it's not a real bug, say so briefly rather than silently ignoring it.
 15. Before reading an unfamiliar or large file in full, consider list_symbols first to see its \
 function/class map - it's near-instant and often tells you exactly which part to read.
 16. For a large file, use read_file's start_line/end_line to read just the relevant section \
