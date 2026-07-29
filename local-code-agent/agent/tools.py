@@ -4,6 +4,7 @@ import fnmatch
 import json
 import shutil
 import subprocess
+import tempfile
 import threading
 import webbrowser
 from collections import deque
@@ -75,7 +76,282 @@ def _check_syntax(path: Path) -> tuple[bool, str | None]:
             return True, f"JS syntax error: {proc.stderr.strip()[:300]}"
         return True, None
 
+    if ext == ".rb":
+        ruby = shutil.which("ruby")
+        if not ruby:
+            return False, None
+        try:
+            proc = subprocess.run([ruby, "-c", str(path)], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None
+        if proc.returncode != 0:
+            return True, f"Ruby syntax error: {(proc.stderr or proc.stdout).strip()[:300]}"
+        return True, None
+
+    if ext == ".php":
+        php = shutil.which("php")
+        if not php:
+            return False, None
+        try:
+            proc = subprocess.run([php, "-l", str(path)], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None
+        if proc.returncode != 0:
+            return True, f"PHP syntax error: {(proc.stdout or proc.stderr).strip()[:300]}"
+        return True, None
+
     return False, None
+
+
+def _tool_check(binary: str, cmd: list[str], cwd: Path | None = None, timeout: int = 20) -> tuple[bool, bool, str]:
+    """Generic runner for external checker tools. Returns (available, passed, output):
+    available=False means the binary wasn't found on PATH - callers should report
+    nothing rather than a false pass/fail. Otherwise passed=(exit code 0) with the
+    combined stdout+stderr, trimmed by the caller as needed.
+    """
+    if not shutil.which(binary):
+        return False, False, ""
+    try:
+        proc = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return True, False, str(e)
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return True, proc.returncode == 0, output
+
+
+def _check_c_family(path: Path, compiler: str, project_root: Path) -> str:
+    """gcc/g++ -fsyntax-only: a real, standard compiler feature that checks syntax
+    AND semantics (undeclared identifiers, type mismatches) without producing an
+    object file - the single tool invocation covers what pyflakes covers for Python.
+    """
+    available, passed, output = _tool_check(
+        compiler, [compiler, "-fsyntax-only", "-I", str(project_root), str(path)], timeout=20,
+    )
+    if not available:
+        return ""
+    if passed:
+        return f"Code check: OK ({compiler} -fsyntax-only found no errors)"
+    return f"⚠ Code check FAILED ({compiler} -fsyntax-only):\n{output[:1500]}\nFix these before moving on."
+
+
+def _check_go(path: Path, project_root: Path) -> str:
+    """go vet catches both syntax errors and real semantic issues (unused imports
+    are a compile ERROR in Go, not just a lint warning) in one pass."""
+    available, passed, output = _tool_check("go", ["go", "vet", str(path)], cwd=project_root, timeout=30)
+    if not available:
+        return ""
+    if passed:
+        return "Code check: OK (go vet found no issues)"
+    return f"⚠ Code check FAILED (go vet):\n{output[:1500]}\nFix these before moving on."
+
+
+def _check_rust(path: Path, project_root: Path) -> str:
+    """cargo check type-checks the whole crate without producing a binary. Only
+    runs if a Cargo.toml is present - without one there's no sensible crate to
+    check, and cargo would just fail with an unrelated "no such file" error."""
+    if not (project_root / "Cargo.toml").exists():
+        return ""
+    available, passed, output = _tool_check(
+        "cargo", ["cargo", "check", "--message-format=short"], cwd=project_root, timeout=60,
+    )
+    if not available:
+        return ""
+    if passed:
+        return "Code check: OK (cargo check found no issues in the project)"
+    lines = output.splitlines()
+    relevant = [l for l in lines if path.name in l] or lines[:20]
+    return "⚠ Code check FAILED (cargo check):\n" + "\n".join(relevant[:20]) + "\nFix these before moving on."
+
+
+def _check_java(path: Path, project_root: Path) -> str:
+    """javac actually compiles (to a throwaway temp dir), which - like gcc/go/cargo -
+    catches syntax AND semantic errors in one pass. Sibling classes in the project
+    are made available via -sourcepath/-cp so this doesn't misfire on same-project
+    references, though anything outside the project (external jars) isn't resolvable
+    this way and could produce a false failure - review before trusting a FAILED
+    result blindly if the project uses external dependencies."""
+    out_dir = tempfile.mkdtemp(prefix="agent_javac_")
+    available, passed, output = _tool_check(
+        "javac",
+        ["javac", "-d", out_dir, "-cp", str(project_root), "-sourcepath", str(project_root), str(path)],
+        timeout=30,
+    )
+    if not available:
+        return ""
+    if passed:
+        return "Code check: OK (javac compiled with no errors)"
+    return f"⚠ Code check FAILED (javac):\n{output[:1500]}\nFix these before moving on (note: unresolved external/third-party imports can cause a false failure here)."
+
+
+def _check_typescript(path: Path, project_root: Path) -> str:
+    """tsc --noEmit type-checks without emitting output. Only runs if a tsconfig.json
+    exists - without a real TS project configured, per-file checking produces mostly
+    noise about unresolvable imports rather than useful signal."""
+    tsconfig = project_root / "tsconfig.json"
+    if not tsconfig.exists():
+        return ""
+    tsc_bin = shutil.which("tsc")
+    if not tsc_bin:
+        local_tsc = project_root / "node_modules" / ".bin" / "tsc"
+        tsc_bin = str(local_tsc) if local_tsc.exists() else None
+    if not tsc_bin:
+        return ""
+    try:
+        proc = subprocess.run([tsc_bin, "--noEmit", "-p", str(tsconfig)],
+                               cwd=str(project_root), capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode == 0:
+        return "Code check: OK (tsc --noEmit found no type errors in the project)"
+    lines = output.splitlines()
+    relevant = [l for l in lines if path.name in l]
+    shown = relevant if relevant else lines[:20]
+    note = "" if relevant else " (showing the first errors found project-wide - none specifically named this file)"
+    return f"⚠ Code check found type errors (tsc){note}:\n" + "\n".join(shown[:20]) + "\nFix these before moving on."
+
+
+def _lint_js_eslint(path: Path) -> list[str] | None:
+    """Deeper-than-syntax check for JS/TS via eslint, if it's installed - mirrors
+    what pyflakes does for Python (undefined variables, unused variables), using a
+    minimal inline ruleset rather than requiring the project to have its own
+    eslint config. Returns None if eslint isn't available (not checked)."""
+    eslint_bin = shutil.which("eslint")
+    if not eslint_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [eslint_bin, "--no-eslintrc",
+             "--parser-options=ecmaVersion:2022,sourceType:module",
+             "--env", "es2021,node,browser",
+             "--rule", '{"no-undef":"error","no-unused-vars":"warn"}',
+             "--format", "json", str(path)],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        results = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    issues = []
+    for file_result in results:
+        for msg in file_result.get("messages", []):
+            issues.append(f"line {msg.get('line', '?')}: {msg.get('message', '')}")
+    return issues
+
+
+def _lint_python(text: str, filename: str) -> list[str] | None:
+    """Deeper-than-syntax correctness check for Python: undefined names, unused
+    imports/variables, redefinition, and similar real bugs that still PARSE fine
+    (so _check_syntax alone would miss them). Uses pyflakes if it's installed -
+    a well-established, low-false-positive static analyzer, not a hand-rolled
+    checker that would risk crying wolf on correct code.
+
+    This necessarily runs on the WHOLE file, not an isolated snippet - resolving
+    whether a name is "undefined" requires seeing the file's imports and other
+    definitions, so checking a function/class in isolation would misfire constantly.
+    Running it on the whole file after every edit still means whatever function or
+    class you just added gets checked in its real context, which is what matters.
+
+    Returns None if pyflakes isn't installed (not checked, so callers should NOT
+    report "OK" - that would be a false claim). Otherwise a list of "line N: ..."
+    strings; empty list means checked and clean.
+    """
+    try:
+        from pyflakes.checker import Checker
+    except ImportError:
+        return None
+    try:
+        tree = ast.parse(text)
+        checker = Checker(tree, filename=filename)
+    except Exception:
+        # if it doesn't even parse, _check_syntax already reported that -
+        # nothing useful to add here, and pyflakes internals can be fragile
+        # on some malformed trees, so fail safe rather than crash the tool.
+        return None
+    issues = []
+    for msg in checker.messages:
+        try:
+            rendered = msg.message % msg.message_args
+        except Exception:
+            rendered = str(msg)
+        issues.append(f"line {msg.lineno}: {rendered}")
+    return issues
+
+
+def _format_check_result(path: Path, project_root: Path) -> str:
+    """The single combined syntax + code-quality report appended after every
+    write_file/edit_file/scaffold_files call, so the model finds out about a
+    broken or suspect change in the SAME turn instead of the user catching it.
+    Dispatches by extension since different languages need different tools -
+    for compiled/typed languages (C/C++/Go/Rust/Java/TS) one compiler invocation
+    covers both syntax and semantics at once; for Python/JS it's a two-step
+    syntax-then-deeper-lint, matching how those ecosystems' tools actually work.
+    """
+    ext = path.suffix.lower()
+
+    # -- compiled/typed languages: one tool call covers syntax + semantics -----
+    if ext in (".c", ".h"):
+        return _check_c_family(path, "gcc", project_root)
+    if ext in (".cpp", ".cc", ".cxx", ".hpp", ".hh"):
+        return _check_c_family(path, "g++", project_root)
+    if ext == ".go":
+        return _check_go(path, project_root)
+    if ext == ".rs":
+        return _check_rust(path, project_root)
+    if ext == ".java":
+        return _check_java(path, project_root)
+    if ext in (".ts", ".tsx"):
+        return _check_typescript(path, project_root)
+
+    # -- everything else: syntax check first, then an optional deeper pass -----
+    checked, syntax_error = _check_syntax(path)
+    if not checked:
+        return ""  # this file type isn't verified this way - say nothing, claim nothing
+
+    if syntax_error:
+        return f"⚠ Syntax check FAILED: {syntax_error} - fix this before moving on."
+
+    lines = ["Syntax check: OK"]
+
+    if ext == ".py":
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            text = None
+        issues = _lint_python(text, str(path)) if text is not None else None
+        if issues is None:
+            pass  # pyflakes not installed - no code-check claim either way
+        elif issues:
+            shown = issues[:10]
+            extra = f"\n  ...and {len(issues) - 10} more" if len(issues) > 10 else ""
+            lines.append(
+                f"⚠ Code check found {len(issues)} potential issue(s):\n"
+                + "\n".join(f"  - {i}" for i in shown) + extra
+                + "\nReview these - fix real bugs, but a name that's clearly defined "
+                  "dynamically, via a wildcard import, or a false positive can be noted "
+                  "and left if you're confident it's not actually wrong."
+            )
+        else:
+            lines.append("Code check: OK (no undefined names, unused imports, or similar issues found)")
+
+    elif ext in (".js", ".mjs", ".cjs"):
+        issues = _lint_js_eslint(path)
+        if issues is None:
+            pass  # eslint not installed - no code-check claim either way
+        elif issues:
+            shown = issues[:10]
+            extra = f"\n  ...and {len(issues) - 10} more" if len(issues) > 10 else ""
+            lines.append(
+                f"⚠ Code check found {len(issues)} potential issue(s):\n"
+                + "\n".join(f"  - {i}" for i in shown) + extra
+                + "\nReview these before moving on."
+            )
+        else:
+            lines.append("Code check: OK (eslint found no undefined/unused-variable issues)")
+
+    return "\n".join(lines)
 
 
 TOOL_SCHEMAS = [
@@ -531,9 +807,9 @@ class ToolRegistry:
             return ToolResult(text="Permission denied by user. File not changed.")
         apply_edit(target, content)
         result = f"Wrote {path} ({len(content.splitlines())} lines)."
-        checked, error = _check_syntax(target)
-        if checked:
-            result += f"\n⚠ Syntax check FAILED: {error} - fix this before moving on." if error else "\nSyntax check: OK"
+        check_report = _format_check_result(target, self.root)
+        if check_report:
+            result += "\n" + check_report
         return ToolResult(text=result)
 
     def _tool_edit_file(self, path: str, old_str: str, new_str: str) -> ToolResult:
@@ -554,9 +830,9 @@ class ToolRegistry:
             return ToolResult(text="Permission denied by user. File not changed.")
         apply_edit(target, new_content)
         result = f"Edited {path}."
-        checked, error = _check_syntax(target)
-        if checked:
-            result += f"\n⚠ Syntax check FAILED: {error} - fix this before moving on." if error else "\nSyntax check: OK"
+        check_report = _format_check_result(target, self.root)
+        if check_report:
+            result += "\n" + check_report
         return ToolResult(text=result)
 
     def _tool_run_command(self, command: str) -> ToolResult:
@@ -613,15 +889,15 @@ class ToolRegistry:
         for target, path, content, _ in previews:
             apply_edit(target, content)
 
-        issues = []
+        reports = []
         for target, path, content, _ in previews:
-            checked, error = _check_syntax(target)
-            if checked and error:
-                issues.append(f"{path}: {error}")
+            check_report = _format_check_result(target, self.root)
+            if check_report:
+                reports.append(f"{path}:\n  " + check_report.replace("\n", "\n  "))
 
         result = f"Created/updated {len(previews)} files: " + ", ".join(p for _, p, _, _ in previews)
-        if issues:
-            result += "\n⚠ Syntax check FAILED for:\n" + "\n".join(issues) + "\nFix these before moving on."
+        if reports:
+            result += "\n\n" + "\n\n".join(reports)
         return ToolResult(text=result)
 
     def _tool_start_dev_server(self, command: str) -> ToolResult:
