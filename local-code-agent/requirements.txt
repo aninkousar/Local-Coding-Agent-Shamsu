@@ -3,6 +3,7 @@ rich>=13.7.0
 PyYAML>=6.0.1
 numpy>=1.26.0
 flask>=3.0.0
+pyflakes>=3.2.0
 
 # Optional, only imported lazily when you actually open these file types.
 # Install on demand: pip install pypdf python-docx
