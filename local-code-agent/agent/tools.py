@@ -2,16 +2,19 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
+import urllib.parse
 import webbrowser
 from collections import deque
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable, Any
 
+import requests
 from rich.console import Console
 
 from .permissions import PermissionManager
@@ -697,6 +700,30 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_local_server",
+            "description": "Send a real HTTP request to YOUR OWN running dev server (started with start_dev_server) to verify an endpoint actually works - not a static check, an actual runtime call. Use this after wiring frontend and backend together, to confirm they're actually connected rather than just assuming it from reading the code. Only works against localhost/127.0.0.1 - refuses any external URL, since this agent otherwise makes no network calls beyond your local Ollama server.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Must be a localhost/127.0.0.1 URL, e.g. http://localhost:5000/api/users."},
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "description": "Defaults to GET."},
+                    "expected_status": {"type": "integer", "description": "Optional - if given, flags a mismatch if the actual status differs."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_api_routes",
+            "description": "Scan the project for backend route definitions (Flask/Express-style) and frontend fetch/axios calls, shown as two separate lists side by side. Use this when wiring a frontend to a backend, to visually spot-check that what the frontend calls actually matches what the backend defines - this does NOT auto-diff or judge matches/mismatches for you (routes with path parameters like /users/<id> won't string-match exactly), it just surfaces both lists so you can compare them yourself.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -1148,3 +1175,86 @@ class ToolRegistry:
             return ToolResult(text=str(e))
         except Exception as e:
             return ToolResult(text=f"Execute error: {e}")
+
+    # -- full-stack integration verification -------------------------------------
+    _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+    def _tool_check_local_server(self, url: str, method: str = "GET", expected_status: int | None = None) -> ToolResult:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.hostname not in self._LOCAL_HOSTS:
+            return ToolResult(
+                text=f"Refused: '{parsed.hostname}' is not a local address. This tool only checks "
+                     f"your own dev server on localhost/127.0.0.1 - this agent otherwise makes no "
+                     f"network calls beyond your local Ollama server, and this tool doesn't change that."
+            )
+        if not self.perm.request_action(f"Send an HTTP {method.upper()} request to {url} (your own local dev server)?"):
+            return ToolResult(text="Permission denied by user.")
+        try:
+            resp = requests.request(method.upper(), url, timeout=8)
+        except requests.RequestException as e:
+            return ToolResult(text=f"Request failed: {e}\n(is the dev server actually running? check_process_output can confirm.)")
+
+        status_note = ""
+        if expected_status is not None and resp.status_code != expected_status:
+            status_note = f"\n⚠ Expected status {expected_status}, got {resp.status_code}."
+        body_preview = resp.text[:1000] if resp.text else "(empty body)"
+        return ToolResult(text=f"{method.upper()} {url} -> HTTP {resp.status_code}{status_note}\n\nResponse body (first 1000 chars):\n{body_preview}")
+
+    _ROUTE_PATTERNS = [
+        re.compile(r"""@\w+\.route\(\s*['"]([^'"]+)['"]"""),                              # Flask
+        re.compile(r"""\b(?:app|router)\.(?:get|post|put|delete|patch)\(\s*['"]([^'"]+)['"]"""),  # Express
+    ]
+    _CALL_PATTERNS = [
+        re.compile(r"""fetch\(\s*['"]([^'"]+)['"]"""),                                     # fetch('...')
+        re.compile(r"""fetch\(\s*`([^`$]*)"""),                                            # fetch(`...${x}`) - static prefix only
+        re.compile(r"""axios\.(?:get|post|put|delete|patch)\(\s*['"]([^'"]+)['"]"""),       # axios('...')
+        re.compile(r"""axios\.(?:get|post|put|delete|patch)\(\s*`([^`$]*)"""),              # axios(`...${x}`)
+    ]
+    _SCAN_EXTS = {".py", ".js", ".ts", ".jsx", ".tsx"}
+
+    def _tool_list_api_routes(self) -> ToolResult:
+        routes: dict[str, list[str]] = {}
+        calls: dict[str, list[str]] = {}
+        ignore_dirs = self.index_cfg.get("ignore_dirs", set())
+
+        for p in self.root.rglob("*"):
+            if p.is_dir() or p.suffix.lower() not in self._SCAN_EXTS:
+                continue
+            if any(part in ignore_dirs for part in p.parts):
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            rel = str(p.relative_to(self.root))
+            for pat in self._ROUTE_PATTERNS:
+                for m in pat.findall(text):
+                    routes.setdefault(m, []).append(rel)
+            for pat in self._CALL_PATTERNS:
+                for m in pat.findall(text):
+                    if m.startswith("/") or m.startswith("http://localhost") or m.startswith("http://127.0.0.1"):
+                        calls.setdefault(m, []).append(rel)
+
+        if not routes and not calls:
+            return ToolResult(text="No Flask/Express-style routes or fetch/axios calls found in this project.")
+
+        lines = ["Backend routes found:"]
+        if routes:
+            for path, files in sorted(routes.items()):
+                lines.append(f"  {path}  (in {', '.join(sorted(set(files)))})")
+        else:
+            lines.append("  (none found)")
+
+        lines.append("\nFrontend calls found:")
+        if calls:
+            for path, files in sorted(calls.items()):
+                lines.append(f"  {path}  (in {', '.join(sorted(set(files)))})")
+        else:
+            lines.append("  (none found)")
+
+        lines.append(
+            "\nNote: these lists are NOT auto-compared - routes with path parameters "
+            "(e.g. /users/<id> vs a frontend call to /users/42) won't string-match exactly "
+            "even when they're actually the same endpoint. Review both lists yourself."
+        )
+        return ToolResult(text="\n".join(lines))
