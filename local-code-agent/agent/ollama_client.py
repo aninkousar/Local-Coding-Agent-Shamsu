@@ -13,7 +13,9 @@ class OllamaError(RuntimeError):
 
 class OllamaClient:
     """Talks only to http://localhost:11434 (or wherever your local Ollama lives).
-    No other network call exists anywhere in this codebase.
+    The only other network-capable code in this project is check_local_server
+    (agent/tools.py, refuses anything not on localhost/127.0.0.1) and db_tools.py's
+    optional Postgres/MySQL support - both require explicit per-call user approval.
     """
 
     def __init__(self, host: str, chat_model: str, embed_model: str,
