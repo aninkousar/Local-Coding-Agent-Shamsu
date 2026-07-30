@@ -19,6 +19,7 @@ class GuiPermissionManager:
     _session_allow_commands: set = field(default_factory=set)
     _session_allow_all_reads: bool = False
     _session_allow_all_writes: bool = False
+    _session_allow_all_db_writes: bool = False
 
     def _within_allowed_roots(self, path: Path) -> bool:
         rp = path.resolve()
@@ -154,3 +155,18 @@ class GuiPermissionManager:
     def request_action(self, description: str) -> bool:
         choice = self._ask("action", description)
         return choice in ("y", "always", "session")
+
+    def request_db_write(self, description: str, sql_preview: str = "") -> bool:
+        if self._session_allow_all_db_writes:
+            return True
+        choice = self._ask(
+            "db_write", description,
+            danger="This will modify a database - data changes are not covered by diff review.",
+            diff=sql_preview or None,
+        )
+        if choice == "y":
+            return True
+        if choice in ("always", "session"):
+            self._session_allow_all_db_writes = True
+            return True
+        return False
