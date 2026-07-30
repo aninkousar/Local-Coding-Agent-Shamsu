@@ -158,6 +158,36 @@ explicit, visible plan gives it (and you) something concrete to check progress a
 you catch a wrong approach after step one instead of after step five. It's skipped automatically
 for simple one-step requests, so you won't see a plan for "what does this function do."
 
+## Database support
+
+Four tools, all permission-gated: `db_schema` (list tables/columns), `db_query` (read-only -
+rejects anything that isn't SELECT/EXPLAIN/PRAGMA/SHOW), `db_execute` (write/DDL - INSERT,
+UPDATE, CREATE, ALTER, DROP), and `db_execute_file` (run a multi-statement `.sql` migration as
+one all-or-nothing transaction).
+
+- **SQLite works out of the box** - no extra install, it's Python's stdlib `sqlite3` module. This
+  is the default for a reason: no server, no credentials, just a file, which fits a fully local
+  offline agent. Postgres and MySQL are supported too, via `pip install psycopg2-binary` /
+  `pip install pymysql` respectively.
+- **`dry_run=true` runs inside a transaction and rolls back** - useful for previewing exactly what
+  a migration or a `DELETE`/`DROP` would do before committing to it for real. This was tested
+  specifically against DDL statements (`CREATE`/`DROP`/`ALTER`), because Python's `sqlite3` module
+  has a real gotcha here: it does NOT automatically start a transaction before DDL the way it does
+  before `INSERT`/`UPDATE`/`DELETE`, so a naive rollback-after-DDL is a silent no-op that would
+  have actually executed the destructive statement for real. This is now fixed with an explicit
+  transaction start - it isn't a hypothetical concern, it's a bug this project's own testing
+  caught and corrected before shipping.
+- **Credentials never pass through the model.** For Postgres/MySQL, `db_path` is the *name* of an
+  environment variable holding the real connection string, not the string itself - set it before
+  starting the agent (`export DATABASE_URL=postgresql://...`) and the model only ever sees the
+  variable name, never anything that would end up sitting in conversation history.
+- **`.sql` files get a syntax check too** (via a throwaway in-memory SQLite database - pure
+  stdlib, a real parser, not a hand-rolled one), on the same write_file/edit_file/scaffold_files
+  cycle as every other language. Honest limitation: this only fully validates a *self-contained*
+  script - a statement that alters a table not created earlier in the same file will report a
+  false "no such table" error, since the check has no way to see your real target database's
+  existing schema.
+
 ## Built for writing code efficiently
 
 A few tools and behaviors exist specifically to reduce wasted round-trips and catch mistakes
@@ -354,3 +384,9 @@ Two further upgrades now built in:
   full markdown (no lists/headers/tables yet); the Flask dev server it runs on is fine for this
   single-user local use case but isn't hardened for exposure beyond `127.0.0.1`, so don't
   port-forward it.
+- **Database-specific**: `db_execute_file` splits multi-statement scripts on `;` naively - a
+  semicolon inside a string literal or a stored procedure body would misparse. Postgres/MySQL
+  support needs their driver installed and couldn't be tested against a real server in this
+  project's own development sandbox (no such server was available there) - the SQLite path was
+  tested thoroughly and directly caught one real transaction-handling bug before shipping;
+  treat the Postgres/MySQL paths as less battle-tested until you've exercised them yourself.
