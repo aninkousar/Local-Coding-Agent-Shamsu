@@ -4,6 +4,27 @@ All notable changes to Local Code Agent, in order. This reflects the actual buil
 this project rather than dated releases - entries are numbered, not timestamped, since they were
 all produced across one continuous development session rather than separate calendar releases.
 
+## 20. Database support
+Added four permission-gated tools: `db_schema`, `db_query` (read-only, rejects writes), `db_execute`
+(write/DDL, supports `dry_run`), and `db_execute_file` (multi-statement `.sql` scripts as one
+transaction). SQLite works with zero extra install (stdlib `sqlite3`); Postgres/MySQL are optional
+via `psycopg2-binary`/`pymysql`. Credentials never pass through the model - for Postgres/MySQL,
+the tool argument is an environment variable *name*, not the connection string itself. Also added
+a `.sql` syntax check (via a throwaway in-memory SQLite database) to the existing multi-language
+correctness-checking system, and a dedicated `request_db_write` permission gate distinct from file
+writes, so a session-wide "yes" to one never silently covers the other.
+
+**A real, critical bug was found and fixed during this work**: Python's `sqlite3` module does not
+automatically open a transaction before DDL statements (`CREATE`/`DROP`/`ALTER`) the way it does
+before `INSERT`/`UPDATE`/`DELETE`. Without an explicit `BEGIN`, calling `.rollback()` after a `DROP
+TABLE` was a silent no-op - meaning `dry_run=true` on a destructive schema change would have
+executed it for real instead of previewing it. Confirmed with a minimal reproduction, fixed by
+issuing an explicit transaction start before every SQLite statement, and re-verified the exact
+failing scenario (dry-run `DROP TABLE`) afterward to confirm the data survives.
+- New: `agent/db_tools.py`
+- Also touched: `agent/tools.py`, `agent/permissions.py`, `gui/permissions_gui.py`,
+  `agent/prompts.py`, `requirements.txt`, `README.md`
+
 ## 19. Multi-language correctness checking
 Extended the Python-only "Code check" (pyflakes) to nine more languages, each using that
 ecosystem's own standard tool rather than a hand-rolled checker: JavaScript (`eslint`, optional),
