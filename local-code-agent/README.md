@@ -52,9 +52,12 @@ built from your requirements, using open-weight models you download and run your
    disk, and the agent explains what it changed and why after every edit.
 4. **Asks permission for everything.** Every file read, file write, and shell command is a
    separate approval prompt. Nothing happens silently. See "Permission model" below.
-5. **Runs 100% locally.** After the one-time model download, there is no network call anywhere in
-   this codebase except to `localhost:11434` (your own Ollama server). No API keys, no rate
-   limits, no per-message cost, no usage cap - your only limits are your own hardware.
+5. **Runs 100% locally by default.** After the one-time model download, this codebase makes no
+   network call except to `localhost:11434` (your own Ollama server) - with two narrow, explicit
+   exceptions you control: `check_local_server` (refuses anything that isn't localhost/127.0.0.1)
+   and connecting to a remote Postgres/MySQL database if you choose to configure one. No API
+   keys, no rate limits, no per-message cost, no usage cap - your only limits are your own
+   hardware.
 
 ## Architecture
 
@@ -69,7 +72,9 @@ agent/tools.py            read_file, edit_file, write_file, run_command, search_
 agent/indexer.py          chunk + embed + store codebase in local SQLite (no external vector DB)
 agent/memory.py           rolling summarization so long sessions don't blow the context window
 agent/doc_reader.py       pdf/docx/text extraction
-agent/ollama_client.py    the ONLY network code in this repo - talks to localhost:11434
+agent/ollama_client.py    talks to localhost:11434 (your Ollama server)
+agent/db_tools.py         sqlite/postgres/mysql - postgres/mysql involve their own network calls
+                          to wherever you point them, same as any database client would
     │
     ▼
 Ollama (local server)
@@ -77,6 +82,13 @@ Ollama (local server)
     ▼
 qwen3.5:9b (chat+vision, ~5-7GB RAM at Q4) + nomic-embed-text (~50MB, for codebase search)
 ```
+
+Two tools are deliberate, scoped exceptions to "local only": `check_local_server` refuses any URL
+that isn't localhost/127.0.0.1 (it exists to verify your own dev server actually responds, not to
+make general web requests), and connecting to a remote Postgres/MySQL database is obviously a
+network call to wherever you configured it - same as any database client. Neither of these talks
+to the open internet on your behalf; both require your explicit per-call approval like everything
+else in this project.
 
 Why Ollama instead of raw llama.cpp: it packages the GGUF weights, quantization, and the vision
 projector together, runs as a plain background service, and needs zero manual compilation on
@@ -157,6 +169,37 @@ This exists because a small model drifts more easily on multi-step work than a l
 explicit, visible plan gives it (and you) something concrete to check progress against, and lets
 you catch a wrong approach after step one instead of after step five. It's skipped automatically
 for simple one-step requests, so you won't see a plan for "what does this function do."
+
+## Connecting frontend, backend, and database
+
+Building each layer separately is the easy part - the tools above already covered that. What
+usually breaks a full-stack app is the *wiring* between layers, so two tools exist specifically
+for that:
+
+- **`list_api_routes`** - scans the project for backend route definitions (Flask/Express-style)
+  and frontend `fetch`/`axios` calls (including template-literal calls like
+  `` fetch(`/api/users/${id}`) `` - it captures the static prefix even when the full path can't be
+  string-matched), and shows both lists side by side. It does **not** auto-diff or judge matches -
+  a route with a path parameter won't string-match a call with a real ID in it even when they're
+  the same endpoint - it just puts both lists in front of you so a mismatch is easy to *notice*.
+- **`check_local_server`** - sends a real HTTP request to your own running dev server and reports
+  the actual status code and response body. This is runtime verification, not static analysis:
+  the only way to actually know the frontend and backend are connected is to make them talk to
+  each other and see what happens. **Refuses any URL that isn't localhost/127.0.0.1** - it exists
+  to verify your own dev server, not to make general web requests, and this is enforced in code,
+  not just policy.
+
+The system prompt also nudges the model to make "connect and verify" an explicit last step in its
+plan for any multi-layer task, rather than declaring victory once each layer individually looks
+right - and to prefer same-origin serving (one server handling both the API and the frontend)
+over separate dev servers on different ports, since that sidesteps CORS entirely, which is one
+more thing a small model can get subtly wrong.
+
+**Note on the "fully local" claim**: `check_local_server` and connecting to a remote
+Postgres/MySQL database (if you choose to configure one) are the two exceptions to "the only
+network call is to your local Ollama server" - both require your explicit approval per call, and
+`check_local_server` is hard-refused for anything beyond localhost/127.0.0.1 in code, not just by
+convention.
 
 ## Database support
 
