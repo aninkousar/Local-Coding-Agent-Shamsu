@@ -4,6 +4,24 @@ All notable changes to Local Code Agent, in order. This reflects the actual buil
 this project rather than dated releases - entries are numbered, not timestamped, since they were
 all produced across one continuous development session rather than separate calendar releases.
 
+## 21. Full-stack integration tools
+Added `list_api_routes` (scans the project for backend route definitions and frontend
+fetch/axios calls - including template-literal calls - and shows both lists side by side without
+auto-diffing them, since path-parameter routes won't string-match exactly) and
+`check_local_server` (sends a real HTTP request to verify a running dev server actually responds
+correctly - runtime verification, not static analysis). Also added explicit system-prompt
+guidance to treat "connect and verify" as its own plan step for multi-layer tasks, use
+`list_api_routes` before/after wiring frontend to backend, and prefer same-origin serving over
+separate dev servers to sidestep CORS.
+
+**Honesty note**: `check_local_server` is a deliberate, narrow exception to this project's
+"only network call is to your local Ollama server" claim, repeated in several places up to this
+point. It's hard-refused in code (not just by policy) for anything that isn't localhost/127.0.0.1.
+Every place that made the absolute version of that claim - the architecture diagram, the "runs
+100% locally" bullet, `ollama_client.py`'s docstring, and the system prompt itself - was updated
+to state the real, narrower guarantee instead of quietly becoming inaccurate.
+- `agent/tools.py`, `agent/prompts.py`, `agent/ollama_client.py`, `README.md`
+
 ## 20. Database support
 Added four permission-gated tools: `db_schema`, `db_query` (read-only, rejects writes), `db_execute`
 (write/DDL, supports `dry_run`), and `db_execute_file` (multi-statement `.sql` scripts as one
