@@ -18,6 +18,7 @@ from .permissions import PermissionManager
 from .diffs import make_unified_diff, render_diff, apply_edit
 from .indexer import CodebaseIndex, _STRUCTURE_MARKERS
 from . import doc_reader
+from . import db_tools
 from .ollama_client import OllamaClient
 
 console = Console()
@@ -302,6 +303,18 @@ def _format_check_result(path: Path, project_root: Path) -> str:
         return _check_rust(path, project_root)
     if ext == ".java":
         return _check_java(path, project_root)
+    if ext == ".sql":
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return ""
+        ok, error = db_tools.check_sql_syntax(text)
+        if error:
+            return (f"⚠ SQL check FAILED: {error}\nNote: this validates the script against an empty "
+                     "in-memory database - a statement referencing a table/column that already exists "
+                     "in your real target database (but isn't created earlier in this same file) can "
+                     "show as a false 'no such table' error. Review before assuming it's wrong.")
+        return "SQL check: OK (parses and runs cleanly against a fresh database)"
     if ext in (".ts", ".tsx"):
         return _check_typescript(path, project_root)
 
@@ -616,6 +629,71 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {"path_or_url": {"type": "string", "description": "A relative file path, or a full http(s) URL."}},
                 "required": ["path_or_url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "db_schema",
+            "description": "List the tables and columns in a database. Use this before writing any query or migration against an unfamiliar database.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "db_path": {"type": "string", "description": "For sqlite: a relative file path to the .db/.sqlite file. For postgres/mysql: the NAME of an environment variable holding the connection string (never a raw connection string - credentials must be set as an env var before the agent starts)."},
+                    "db_type": {"type": "string", "enum": ["sqlite", "postgres", "mysql"], "description": "Defaults to sqlite."},
+                },
+                "required": ["db_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "db_query",
+            "description": "Run a read-only SQL query (SELECT/EXPLAIN/PRAGMA/SHOW) and see the results. Rejected if it looks like a write - use db_execute for those.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "db_path": {"type": "string", "description": "For sqlite: a relative file path. For postgres/mysql: an environment variable name holding the connection string."},
+                    "sql": {"type": "string", "description": "The SELECT query to run."},
+                    "db_type": {"type": "string", "enum": ["sqlite", "postgres", "mysql"], "description": "Defaults to sqlite."},
+                },
+                "required": ["db_path", "sql"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "db_execute",
+            "description": "Run a write/DDL SQL statement (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP) against a database. Always requires explicit user approval, shown with the exact SQL. Prefer dry_run=true first to see what would happen without actually changing anything, especially for anything destructive or unfamiliar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "db_path": {"type": "string", "description": "For sqlite: a relative file path. For postgres/mysql: an environment variable name holding the connection string."},
+                    "sql": {"type": "string", "description": "The write/DDL statement to run."},
+                    "db_type": {"type": "string", "enum": ["sqlite", "postgres", "mysql"], "description": "Defaults to sqlite."},
+                    "dry_run": {"type": "boolean", "description": "If true, runs inside a transaction and rolls back - reports what would have happened without changing anything. Defaults to false."},
+                },
+                "required": ["db_path", "sql"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "db_execute_file",
+            "description": "Run a multi-statement .sql migration/script file against a database, as a single all-or-nothing transaction. Always requires explicit user approval. Prefer dry_run=true first for anything destructive or unfamiliar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "db_path": {"type": "string", "description": "For sqlite: a relative file path. For postgres/mysql: an environment variable name holding the connection string."},
+                    "sql_file": {"type": "string", "description": "Relative path to the .sql script to run."},
+                    "db_type": {"type": "string", "enum": ["sqlite", "postgres", "mysql"], "description": "Defaults to sqlite."},
+                    "dry_run": {"type": "boolean", "description": "If true, runs inside a transaction and rolls back. Defaults to false."},
+                },
+                "required": ["db_path", "sql_file"],
             },
         },
     },
@@ -963,3 +1041,110 @@ class ToolRegistry:
             return ToolResult(text="Permission denied by user.")
         webbrowser.open(url)
         return ToolResult(text=f"Opened {target_desc} in your default browser.")
+
+    # -- database tools --------------------------------------------------------
+    def _resolve_db_path(self, db_path: str, db_type: str) -> tuple[str, str | None]:
+        """For sqlite, db_path is a real project-relative file - resolve and
+        boundary-check it like any other file. For postgres/mysql it's just an
+        env var name, not a filesystem path, so there's nothing to resolve.
+        Returns (path_to_use, display_name_or_None_if_blocked)."""
+        if db_type == "sqlite":
+            target = self._resolve(db_path)
+            return str(target), str(target.relative_to(self.root)) if self._path_in_root(target) else None
+        return db_path, db_path
+
+    def _path_in_root(self, target: Path) -> bool:
+        try:
+            target.resolve().relative_to(self.root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def _tool_db_schema(self, db_path: str, db_type: str = "sqlite") -> ToolResult:
+        db_type = db_type or "sqlite"
+        resolved, display = self._resolve_db_path(db_path, db_type)
+        if db_type == "sqlite":
+            target = Path(resolved)
+            if not self._path_in_root(target):
+                return ToolResult(text=f"Blocked: {db_path} is outside the allowed project directory.")
+            if not target.exists():
+                return ToolResult(text=f"Database file does not exist: {db_path}")
+            if not self.perm.request_read(target):
+                return ToolResult(text="Permission denied by user.")
+        else:
+            if not self.perm.request_action(f"Read the schema of the {db_type} database configured by env var '{db_path}'?"):
+                return ToolResult(text="Permission denied by user.")
+        try:
+            return ToolResult(text=db_tools.get_schema(resolved, db_type))
+        except db_tools.DBError as e:
+            return ToolResult(text=str(e))
+        except Exception as e:
+            return ToolResult(text=f"Error reading schema: {e}")
+
+    def _tool_db_query(self, db_path: str, sql: str, db_type: str = "sqlite") -> ToolResult:
+        db_type = db_type or "sqlite"
+        resolved, display = self._resolve_db_path(db_path, db_type)
+        if db_type == "sqlite":
+            target = Path(resolved)
+            if not self._path_in_root(target):
+                return ToolResult(text=f"Blocked: {db_path} is outside the allowed project directory.")
+            if not target.exists():
+                return ToolResult(text=f"Database file does not exist: {db_path}")
+            if not self.perm.request_read(target):
+                return ToolResult(text="Permission denied by user.")
+        else:
+            if not self.perm.request_action(f"Run this read-only query against the {db_type} database configured by env var '{db_path}'?\n{sql}"):
+                return ToolResult(text="Permission denied by user.")
+        try:
+            return ToolResult(text=db_tools.run_query(resolved, sql, db_type))
+        except db_tools.DBError as e:
+            return ToolResult(text=str(e))
+        except Exception as e:
+            return ToolResult(text=f"Query error: {e}")
+
+    def _tool_db_execute(self, db_path: str, sql: str, db_type: str = "sqlite", dry_run: bool = False) -> ToolResult:
+        db_type = db_type or "sqlite"
+        resolved, display = self._resolve_db_path(db_path, db_type)
+        if db_type == "sqlite":
+            target = Path(resolved)
+            if not self._path_in_root(target):
+                return ToolResult(text=f"Blocked: {db_path} is outside the allowed project directory.")
+            label = f"{'[DRY RUN] ' if dry_run else ''}Run this SQL against {db_path}?"
+        else:
+            label = f"{'[DRY RUN] ' if dry_run else ''}Run this SQL against the {db_type} database configured by env var '{db_path}'?"
+        if not self.perm.request_db_write(label, sql_preview=sql):
+            return ToolResult(text="Permission denied by user. Database not changed.")
+        try:
+            return ToolResult(text=db_tools.run_execute(resolved, sql, db_type, dry_run=dry_run))
+        except db_tools.DBError as e:
+            return ToolResult(text=str(e))
+        except Exception as e:
+            return ToolResult(text=f"Execute error: {e}")
+
+    def _tool_db_execute_file(self, db_path: str, sql_file: str, db_type: str = "sqlite", dry_run: bool = False) -> ToolResult:
+        db_type = db_type or "sqlite"
+        script_path = self._resolve(sql_file)
+        if not self._path_in_root(script_path):
+            return ToolResult(text=f"Blocked: {sql_file} is outside the allowed project directory.")
+        if not script_path.exists():
+            return ToolResult(text=f"SQL file does not exist: {sql_file}")
+        if not self.perm.request_read(script_path):
+            return ToolResult(text="Permission denied by user.")
+        sql_text = script_path.read_text(encoding="utf-8", errors="replace")
+
+        resolved, display = self._resolve_db_path(db_path, db_type)
+        if db_type == "sqlite":
+            target = Path(resolved)
+            if not self._path_in_root(target):
+                return ToolResult(text=f"Blocked: {db_path} is outside the allowed project directory.")
+            label = f"{'[DRY RUN] ' if dry_run else ''}Run {sql_file} ({len(sql_text.splitlines())} lines) against {db_path}?"
+        else:
+            label = f"{'[DRY RUN] ' if dry_run else ''}Run {sql_file} against the {db_type} database configured by env var '{db_path}'?"
+        if not self.perm.request_db_write(label, sql_preview=sql_text[:2000]):
+            return ToolResult(text="Permission denied by user. Database not changed.")
+        try:
+            return ToolResult(text=db_tools.run_execute_file(resolved, sql_text, db_type, dry_run=dry_run))
+        except db_tools.DBError as e:
+            return ToolResult(text=str(e))
+        except Exception as e:
+            return ToolResult(text=f"Execute error: {e}")
