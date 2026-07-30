@@ -26,6 +26,7 @@ class PermissionManager:
     _session_allow_commands: set[str] = field(default_factory=set)
     _session_allow_all_reads: bool = False
     _session_allow_all_writes: bool = False
+    _session_allow_all_db_writes: bool = False
 
     # -------------------------------------------------------------------
     def _within_allowed_roots(self, path: Path) -> bool:
@@ -147,6 +148,24 @@ class PermissionManager:
         (e.g. opening a browser preview)."""
         choice = self._ask(description)
         return choice in ("y", "always", "session")
+
+    def request_db_write(self, description: str, sql_preview: str = "") -> bool:
+        """Separate from file writes/commands so a session-wide 'yes' to file edits
+        never silently also covers database writes, and vice versa."""
+        if self._session_allow_all_db_writes:
+            return True
+        if sql_preview:
+            console.print(f"[cyan]{sql_preview}[/cyan]")
+        choice = self._ask(
+            description,
+            danger="This will modify a database - data changes are not covered by undo/diff review.",
+        )
+        if choice == "y":
+            return True
+        if choice in ("always", "session"):
+            self._session_allow_all_db_writes = True
+            return True
+        return False
 
     # -- shell commands -------------------------------------------------------
     def request_command(self, command: str) -> bool:
