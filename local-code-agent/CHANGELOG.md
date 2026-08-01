@@ -4,6 +4,90 @@ All notable changes to Local Code Agent, in order. This reflects the actual buil
 this project rather than dated releases - entries are numbered, not timestamped, since they were
 all produced across one continuous development session rather than separate calendar releases.
 
+## 25. Real installation and verification of PHP's toolchain
+At the user's request, made a more persistent attempt to get PHP itself installed (the previous
+attempt had given up after `apt-get install golang-go`-style 403s; this time, `apt-get update`
+first fixed an initial 404 on `php-cli`, after which `php`, `composer`, and `php-codesniffer`
+(providing `phpcbf`) all installed cleanly). Composer's own package repository (`repo.packagist.org`)
+turned out to be genuinely blocked (unlike the earlier npm/apt 403s, which were transient) - so
+`php-cs-fixer` and `phpstan` couldn't be installed via Composer. Worked around this for PHPStan by
+downloading `phpstan.phar` directly from its GitHub releases, which is PHPStan's own officially
+documented no-Composer installation method, not a workaround. Added `phpcbf` as a real,
+apt-installable fallback formatter alongside `php-cs-fixer` in `format_file`.
+
+This let every remaining PHP claim get upgraded from "fake-binary tested" to "verified against
+the real tool": real PHPStan caught a genuine `$nmae` typo (valid PHP syntax, so `php -l` lets it
+through, exactly mirroring the same bug class already proven for Python/pyflakes, Go/go vet, and
+Rust/cargo check), real `phpcbf` correctly reformatted messy PHP to PSR-12 style, and real
+`phpunit` correctly reported 2 tests/1 failure with exact assertion details.
+
+**A real bug was found and fixed in the process**: `run_tests`' PHP branch invoked bare `phpunit`
+with no target argument. Unlike `pytest`, PHPUnit does not auto-discover tests on its own - it
+just prints its help text and does nothing, silently, if given no file/directory to point at.
+Fixed by explicitly passing the project directory, and reconfirmed against the same real,
+intentionally-mixed-result test suite afterward.
+- `agent/tools.py`, `README.md`
+
+## 24. Real installation and verification of prettier/gofmt/rustfmt/clang-format
+At the user's request, retried installing the four toolchains previously left untested. The
+earlier `npm`/`apt` 403 errors turned out to be inconsistent rather than a hard block - a retry in
+this same sandbox succeeded cleanly: `apt-get` installed `clang-format`, `rustc`+`rustfmt`+`cargo`,
+and `golang-go` (bundling `gofmt`, `go vet`, `go test`) without issue; `npm install -g prettier`
+also succeeded on retry. This let six real formatters get exercised end-to-end through the actual
+`format_file` tool (black, sqlparse, prettier, gofmt, rustfmt, clang-format - all six correctly
+reformatted deliberately messy code), plus real `go vet` (caught a genuine unused-variable compile
+error), real `cargo check` (caught a genuine undefined-variable reference), real `go test` (a
+passing suite), and real `cargo test` (1 passed/1 failed with the actual panic backtrace,
+mirroring the earlier `pytest` verification). Every one of these previously carried an honest
+disclosure that only the routing logic or a fake-binary mock had been verified, not the real tool
+- all of those disclosures are now updated to reflect genuine, direct verification. PHP remains
+the one exception: unlike Go/Rust/C++, no PHP interpreter is available in this sandbox at all
+(not just its formatter/linter), so `php-cs-fixer`/PHPStan/PHPUnit are still only fake-binary
+tested, and the README says so plainly rather than implying otherwise.
+- `README.md` (no code changes - the tools already existed and worked correctly; this update is
+  entirely about closing the gap between "written carefully" and "actually verified")
+
+## 23. Full PHP and SQL treatment
+Extended PHP and SQL to the same level of coverage as every other language: PHP now gets a
+PHPStan-based deeper "Code check" (level 0, catches undefined variables/functions - real bugs
+that still pass `php -l`'s syntax check) alongside `php-cs-fixer` formatting (via a throwaway
+temp-file copy, since it edits in place rather than supporting stdin/stdout) and `phpunit` test
+detection (via `composer.json`, preferring a project-local `vendor/bin/phpunit`). SQL gets
+`sqlparse`-based formatting (pure Python, no external binary) and, more importantly, a
+dangerous-pattern scan wired directly into `db_execute`/`db_execute_file`'s permission prompt -
+a bare `DELETE`/`UPDATE` with no `WHERE`, `DROP TABLE`/`DATABASE`, or `TRUNCATE` now shows an
+explicit warning right where the user approves it, not buried in documentation.
+
+`pip install` continued to work in this sandbox (as discovered in the previous update) - `sqlparse`
+was installed and tested for real, including formatting a query and discovering a genuine, minor
+quirk: `sqlparse` re-cased a column literally named `role` to `ROLE`, because `ROLE` is a keyword
+in some SQL dialects' access-control syntax even though it was just an identifier here. PHP's
+entire toolchain remains unavailable in this sandbox, so `php-cs-fixer`/PHPStan/PHPUnit were
+verified against small fake executables mimicking each real tool's CLI contract - including the
+specific case that matters most: an undefined-variable typo that's syntactically valid PHP (so
+`php -l` correctly lets it through) but gets caught by the fake PHPStan check, mirroring exactly
+the "beyond syntax" correctness pattern already established for Python/pyflakes and JS/eslint.
+The dangerous-SQL-pattern detector itself is pure Python logic with no external dependency, and
+was verified against 9 real cases including several that correctly do NOT warn.
+- `agent/db_tools.py`, `agent/tools.py`, `agent/permissions.py`, `gui/permissions_gui.py`,
+  `agent/prompts.py`, `requirements.txt`, `README.md`
+
+## 22. Auto-formatting and test running
+Added `format_file` (black/prettier/gofmt/rustfmt/clang-format, per language - shows a diff and
+requires approval like any edit, since formatting still changes a real file) and `run_tests`
+(detects and runs pytest/npm test/go test/cargo test - real behavior verification, not another
+static check). `pip install` turned out to work in this project's build sandbox even though npm
+and apt installs were both blocked (403s on registries nominally in the allowed domain list), so
+`black`, `pytest`, and `pyflakes` were all installed for real here - meaning `format_file` was
+verified against genuine `black` (correctly reformatted messy code, correctly detected
+already-formatted files) and `run_tests` against genuine `pytest` (correctly reported a mixed
+pass/fail result with the real traceback). This also let the existing Python "Code check" feature
+get re-verified against the real `pyflakes` library for the first time, having previously only
+been validated against a faithful mock. `prettier`/`gofmt`/`rustfmt`/`clang-format` remain
+untested against their real tools - the routing logic (which command gets chosen for which
+project type) was verified with a mocked subprocess call instead.
+- `agent/tools.py`, `agent/prompts.py`, `requirements.txt`, `README.md`
+
 ## 21. Full-stack integration tools
 Added `list_api_routes` (scans the project for backend route definitions and frontend
 fetch/axios calls - including template-literal calls - and shows both lists side by side without
