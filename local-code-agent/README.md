@@ -231,6 +231,67 @@ one all-or-nothing transaction).
   false "no such table" error, since the check has no way to see your real target database's
   existing schema.
 
+## Auto-formatting and running tests
+
+Two more tools, each deferring to the real standard tool for its language rather than anything
+hand-rolled:
+
+- **`format_file`** - `black` (Python), `sqlparse` (SQL, pure Python - no external binary),
+  `prettier` (JS/TS/CSS/HTML/JSON/YAML/Markdown, if installed), `gofmt` (Go), `rustfmt` (Rust),
+  `clang-format` (C/C++), and for PHP either `php-cs-fixer` (if you have it via Composer) or
+  `phpcbf` from PHP_CodeSniffer as a fallback (installable directly via `apt`/your OS package
+  manager, no Composer/Packagist needed) - both format a throwaway temp copy and read the result
+  back, since neither supports clean stdin/stdout. Shows a diff and requires approval like any
+  other edit - formatting still changes a real file, so it goes through the same gate as
+  `write_file`/`edit_file`, not a silent auto-fix. If a file's already well-formatted, it says so
+  and changes nothing. If no formatter is available for that file type (or the tool isn't
+  installed), it says that plainly rather than pretending to have done something.
+- **`run_tests`** - detects `pytest`-style Python tests, `package.json` (`npm test`), `go.mod`
+  (`go test ./...`), `Cargo.toml` (`cargo test`), or `composer.json` (`phpunit`, preferring a
+  project-local `vendor/bin/phpunit` if present, pointed at the project directory since - unlike
+  `pytest` - PHPUnit doesn't auto-discover tests with no target argument), and runs whichever
+  applies. This is real behavior verification, not another static check - a change can pass every
+  syntax/lint/type check built into this project and still be wrong in ways only running the
+  actual tests would catch.
+- **PHP gets the full treatment**: `php -l` (syntax) plus `PHPStan` at level 0 (undefined
+  variables/functions and similar real bugs that still parse fine).
+- **SQL gets a dangerous-pattern warning, not just a syntax check.** Before `db_execute` or
+  `db_execute_file` actually runs anything, the SQL is scanned for `DELETE`/`UPDATE` with no
+  `WHERE` clause, `DROP TABLE`/`DROP DATABASE`, and `TRUNCATE` - and if found, the exact warning
+  ("DELETE with no WHERE clause - affects EVERY row") appears right in the approval prompt, not
+  buried in documentation. This is a heuristic (a `WHERE` clause hidden in unusual formatting
+  could slip past it), so its absence isn't a safety guarantee - `dry_run` still matters
+  regardless of whether a warning shows up. Verified against 9 real cases including several that
+  should NOT warn (a properly-scoped `DELETE ... WHERE`, a plain `CREATE TABLE`).
+
+**Everything above is now verified against the real tools, including PHP's full toolchain** - a
+prior version of this project could only get PHP-related checks working against fake executables,
+since no PHP interpreter was installable in the build sandbox at the time; a later, more
+persistent attempt got PHP, Composer, `php-codesniffer` (for `phpcbf`), and `phpunit` installed
+via `apt` (retrying after a refreshed package index fixed an initial 404), and `phpstan.phar`
+downloaded directly from its GitHub releases (this is PHPStan's own officially documented
+no-Composer installation method, not a workaround - see
+[phpstan.org's getting-started guide](https://phpstan.org/user-guide/getting-started)). Real
+PHPStan caught a genuine `$nmae` typo that's valid PHP syntax (so `php -l` correctly lets it
+through), real `phpcbf` correctly reformatted messy PHP to PSR-12 style, and real `phpunit`
+correctly reported 2 tests/1 failure with the exact assertion details for an intentionally broken
+test. **A real bug was found and fixed in the process**: `run_tests`' PHP command was invoking
+bare `phpunit` with no target, which - unlike `pytest` - doesn't auto-discover tests and just
+prints its help text instead of running anything silently. Fixed by passing the project directory
+explicitly, and reconfirmed against the same real test suite afterward.
+
+Every other language mentioned above (`black`, `sqlparse`, `prettier`, `gofmt`, `rustfmt`,
+`clang-format`, `go vet`, `cargo check`, `pytest`, `go test`, `cargo test`) was likewise installed
+and exercised for real in this project's build sandbox, not merely mocked - each one took
+genuinely messy or genuinely buggy code and produced the correct, real-tool output.
+
+**Real, minor quirk found during testing, worth knowing about**: `sqlparse`'s `keyword_case`
+option can re-case an identifier that happens to match a keyword in some SQL dialect - e.g. a
+column literally named `role` got uppercased to `ROLE` in testing, because `ROLE` is a keyword in
+some databases' access-control syntax (`CREATE ROLE`), even though here it was just a column
+name. Harmless in practice for case-insensitive identifiers (the vast majority), but worth a
+glance at the diff before approving a SQL formatting change.
+
 ## Built for writing code efficiently
 
 A few tools and behaviors exist specifically to reduce wasted round-trips and catch mistakes
@@ -253,7 +314,7 @@ before you have to:
   | Rust | `cargo check` (only if `Cargo.toml` exists) | full type-checking without producing a binary |
   | Java | `javac` (compiles to a throwaway temp dir) | real compile errors - can false-positive on unresolved external/third-party dependencies |
   | Ruby | `ruby -c` | syntax only - no deeper static analyzer is bundled by default |
-  | PHP | `php -l` | syntax only - same reasoning |
+  | PHP | `php -l` (syntax) + `PHPStan` level 0 (if installed) | syntax, plus undefined variables/functions |
 
   **Every single one of these is entirely optional and detected at runtime** - if a given tool
   isn't installed on your machine, that check is silently skipped and nothing is claimed about
