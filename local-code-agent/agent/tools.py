@@ -245,6 +245,141 @@ def _lint_js_eslint(path: Path) -> list[str] | None:
     return issues
 
 
+def _lint_php_phpstan(path: Path) -> list[str] | None:
+    """Deeper-than-syntax check for PHP via PHPStan, if it's installed - undefined
+    variables/functions, type errors, and similar real bugs beyond what `php -l`
+    (syntax only) catches. Uses level 0 (PHPStan's most basic rule set) so it works
+    without a project-specific configuration file. Returns None if PHPStan isn't
+    available (not checked)."""
+    phpstan_bin = shutil.which("phpstan")
+    if not phpstan_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [phpstan_bin, "analyse", "--no-progress", "--error-format=raw", "--level=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return []
+    issues = []
+    for line in (proc.stdout or "").splitlines():
+        # raw format: path:line:message
+        parts = line.split(":", 2)
+        if len(parts) == 3:
+            issues.append(f"line {parts[1]}: {parts[2].strip()}")
+    return issues if issues else (["PHPStan reported an issue but output could not be parsed - run it directly for details."] if proc.stdout else None)
+
+
+def _format_code(path: Path, text: str) -> tuple[bool, str | None, str | None]:
+    """Runs the standard formatter for this file type, if one is available.
+    Returns (available, formatted_text, error):
+    available=False - no formatter for this type, or the tool isn't installed - say nothing.
+    available=True, error=None - formatted_text holds the result (may be identical to
+      the input if it was already well-formatted).
+    available=True, error=<msg> - the formatter is installed but failed (e.g. the file
+      doesn't parse) - formatted_text is None.
+    """
+    ext = path.suffix.lower()
+
+    if ext == ".py":
+        try:
+            import black
+        except ImportError:
+            return False, None, None
+        try:
+            formatted = black.format_str(text, mode=black.Mode())
+            return True, formatted, None
+        except Exception as e:
+            return True, None, str(e)
+
+    if ext in (".js", ".jsx", ".ts", ".tsx", ".css", ".scss", ".html", ".json", ".md", ".yaml", ".yml"):
+        prettier = shutil.which("prettier")
+        if not prettier:
+            return False, None, None
+        try:
+            proc = subprocess.run([prettier, "--stdin-filepath", str(path)],
+                                   input=text, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None, None
+        if proc.returncode != 0:
+            return True, None, proc.stderr.strip()[:500]
+        return True, proc.stdout, None
+
+    if ext == ".go":
+        gofmt = shutil.which("gofmt")
+        if not gofmt:
+            return False, None, None
+        try:
+            proc = subprocess.run([gofmt], input=text, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None, None
+        if proc.returncode != 0:
+            return True, None, proc.stderr.strip()[:500]
+        return True, proc.stdout, None
+
+    if ext == ".rs":
+        rustfmt = shutil.which("rustfmt")
+        if not rustfmt:
+            return False, None, None
+        try:
+            proc = subprocess.run([rustfmt, "--emit", "stdout"],
+                                   input=text, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None, None
+        if proc.returncode != 0:
+            return True, None, proc.stderr.strip()[:500]
+        return True, proc.stdout, None
+
+    if ext in (".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh"):
+        clang_format = shutil.which("clang-format")
+        if not clang_format:
+            return False, None, None
+        try:
+            proc = subprocess.run([clang_format], input=text, capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None, None
+        if proc.returncode != 0:
+            return True, None, proc.stderr.strip()[:500]
+        return True, proc.stdout, None
+
+    if ext == ".sql":
+        formatted = db_tools.format_sql(text)
+        if formatted is None:
+            return False, None, None
+        return True, formatted, None
+
+    if ext == ".php":
+        if shutil.which("php-cs-fixer"):
+            cmd_template = ["php-cs-fixer", "fix", None, "--rules=@PSR12", "--quiet"]
+        elif shutil.which("phpcbf"):
+            # phpcbf's exit code isn't pass/fail in the usual sense (1 = "fixed
+            # successfully", 2 = "partially fixed", 3 = processing error) - we don't
+            # branch on it at all, just read the file back either way, same as
+            # php-cs-fixer above.
+            cmd_template = ["phpcbf", "--standard=PSR12", None]
+        else:
+            return False, None, None
+
+        tmp_index = cmd_template.index(None)
+        tmp = tempfile.NamedTemporaryFile(suffix=".php", mode="w", delete=False, encoding="utf-8")
+        try:
+            tmp.write(text)
+            tmp.close()
+            cmd = cmd_template.copy()
+            cmd[tmp_index] = tmp.name
+            subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            formatted = Path(tmp.name).read_text(encoding="utf-8", errors="replace")
+        except (OSError, subprocess.TimeoutExpired):
+            return False, None, None
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+        return True, formatted, None
+
+    return False, None, None
+
+
 def _lint_python(text: str, filename: str) -> list[str] | None:
     """Deeper-than-syntax correctness check for Python: undefined names, unused
     imports/variables, redefinition, and similar real bugs that still PARSE fine
@@ -366,6 +501,21 @@ def _format_check_result(path: Path, project_root: Path) -> str:
             )
         else:
             lines.append("Code check: OK (eslint found no undefined/unused-variable issues)")
+
+    elif ext == ".php":
+        issues = _lint_php_phpstan(path)
+        if issues is None:
+            pass  # PHPStan not installed - no code-check claim either way
+        elif issues:
+            shown = issues[:10]
+            extra = f"\n  ...and {len(issues) - 10} more" if len(issues) > 10 else ""
+            lines.append(
+                f"⚠ Code check found {len(issues)} potential issue(s):\n"
+                + "\n".join(f"  - {i}" for i in shown) + extra
+                + "\nReview these before moving on."
+            )
+        else:
+            lines.append("Code check: OK (PHPStan level 0 found no issues)")
 
     return "\n".join(lines)
 
@@ -722,6 +872,29 @@ TOOL_SCHEMAS = [
             "name": "list_api_routes",
             "description": "Scan the project for backend route definitions (Flask/Express-style) and frontend fetch/axios calls, shown as two separate lists side by side. Use this when wiring a frontend to a backend, to visually spot-check that what the frontend calls actually matches what the backend defines - this does NOT auto-diff or judge matches/mismatches for you (routes with path parameters like /users/<id> won't string-match exactly), it just surfaces both lists so you can compare them yourself.",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "format_file",
+            "description": "Auto-format a file with the standard formatter for its language (black for Python, prettier for JS/TS/CSS/HTML/JSON/YAML/Markdown if installed, gofmt for Go, rustfmt for Rust, clang-format for C/C++). Shows a diff and requires approval like any edit. Use this instead of manually fussing over indentation/spacing - let the real tool handle style so you can focus on logic. If no formatter is available for the file type or installed on this machine, says so rather than silently doing nothing.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Relative path from project root."}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": "Detect and run this project's test suite (pytest for Python, npm test for Node, go test for Go, cargo test for Rust) and report the results. This is real behavior verification, going beyond static syntax/correctness checks - use it after making a change to code that has tests, to confirm it actually still works rather than just looking right. Requires approval like any command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Optional subdirectory to scope the test run to. Defaults to the whole project."}},
+            },
         },
     },
 ]
@@ -1139,7 +1312,8 @@ class ToolRegistry:
             label = f"{'[DRY RUN] ' if dry_run else ''}Run this SQL against {db_path}?"
         else:
             label = f"{'[DRY RUN] ' if dry_run else ''}Run this SQL against the {db_type} database configured by env var '{db_path}'?"
-        if not self.perm.request_db_write(label, sql_preview=sql):
+        warnings = db_tools.detect_dangerous_sql(sql)
+        if not self.perm.request_db_write(label, sql_preview=sql, danger_warnings=warnings):
             return ToolResult(text="Permission denied by user. Database not changed.")
         try:
             return ToolResult(text=db_tools.run_execute(resolved, sql, db_type, dry_run=dry_run))
@@ -1167,7 +1341,8 @@ class ToolRegistry:
             label = f"{'[DRY RUN] ' if dry_run else ''}Run {sql_file} ({len(sql_text.splitlines())} lines) against {db_path}?"
         else:
             label = f"{'[DRY RUN] ' if dry_run else ''}Run {sql_file} against the {db_type} database configured by env var '{db_path}'?"
-        if not self.perm.request_db_write(label, sql_preview=sql_text[:2000]):
+        warnings = db_tools.detect_dangerous_sql(sql_text)
+        if not self.perm.request_db_write(label, sql_preview=sql_text[:2000], danger_warnings=warnings):
             return ToolResult(text="Permission denied by user. Database not changed.")
         try:
             return ToolResult(text=db_tools.run_execute_file(resolved, sql_text, db_type, dry_run=dry_run))
@@ -1258,3 +1433,66 @@ class ToolRegistry:
             "even when they're actually the same endpoint. Review both lists yourself."
         )
         return ToolResult(text="\n".join(lines))
+
+    # -- formatting and test running --------------------------------------------------
+    def _tool_format_file(self, path: str) -> ToolResult:
+        target = self._resolve(path)
+        if not target.exists():
+            return ToolResult(text=f"File does not exist: {path}")
+        if not self.perm.request_read(target):
+            return ToolResult(text="Permission denied by user.")
+
+        original = target.read_text(encoding="utf-8", errors="replace")
+        available, formatted, error = _format_code(target, original)
+
+        if not available:
+            return ToolResult(text=f"No formatter available for {target.suffix or '(no extension)'} files "
+                                     f"(either this file type has none wired up, or the tool isn't installed).")
+        if error:
+            return ToolResult(text=f"Formatting failed: {error}")
+        if formatted == original:
+            return ToolResult(text=f"{path} is already formatted - no changes needed.")
+
+        diff = make_unified_diff(original, formatted, path)
+        console.print(f"\n[bold]Proposed formatting change to {path}:[/bold]")
+        render_diff(diff)
+        if not self.perm.request_write(target, preview=diff):
+            return ToolResult(text="Permission denied by user. File not changed.")
+        apply_edit(target, formatted)
+        return ToolResult(text=f"Formatted {path}.")
+
+    def _tool_run_tests(self, path: str = ".") -> ToolResult:
+        scope = self._resolve(path) if path and path != "." else self.root
+        if not self._path_in_root(scope):
+            return ToolResult(text=f"Blocked: {path} is outside the allowed project directory.")
+
+        if (self.root / "Cargo.toml").exists():
+            cmd = ["cargo", "test"]
+        elif (self.root / "go.mod").exists():
+            cmd = ["go", "test", "./..."]
+        elif (self.root / "package.json").exists():
+            cmd = ["npm", "test"]
+        elif (self.root / "composer.json").exists():
+            local_phpunit = self.root / "vendor" / "bin" / "phpunit"
+            phpunit_bin = str(local_phpunit) if local_phpunit.exists() else "phpunit"
+            # unlike pytest, phpunit does NOT auto-discover tests with no arguments -
+            # it needs an explicit file/directory target or it just prints its help text.
+            cmd = [phpunit_bin, str(scope)]
+        elif next(self.root.rglob("test_*.py"), None) or next(self.root.rglob("*_test.py"), None) \
+                or (self.root / "pytest.ini").exists() or (self.root / "tests").is_dir():
+            cmd = ["python3", "-m", "pytest", str(scope), "-v", "--tb=short"]
+        else:
+            return ToolResult(text="No recognized test setup found (looked for pytest-style Python tests, "
+                                     "package.json, composer.json, go.mod, Cargo.toml). If tests exist under "
+                                     "a different convention, run them with run_command instead.")
+
+        if not self.perm.request_command(" ".join(cmd)):
+            return ToolResult(text="Permission denied by user. Tests not run.")
+        try:
+            proc = subprocess.run(cmd, cwd=str(self.root), capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return ToolResult(text="Tests timed out after 120s.")
+        except OSError as e:
+            return ToolResult(text=f"Could not run tests: {e}")
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return ToolResult(text=f"(exit code {proc.returncode})\n{output[-6000:]}")
