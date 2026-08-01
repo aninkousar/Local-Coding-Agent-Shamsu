@@ -170,6 +170,15 @@ explicit, visible plan gives it (and you) something concrete to check progress a
 you catch a wrong approach after step one instead of after step five. It's skipped automatically
 for simple one-step requests, so you won't see a plan for "what does this function do."
 
+**On the wire, a plan is just a flat list of strings** - `["[x] Create the model", "[~] Build the
+route", "[ ] Add tests"]` - deliberately not a nested list of objects with separate
+description/status fields. Tool-calling reliability on smaller local models is known to degrade
+with schema complexity, and a flat string array is about as simple a shape as JSON schema
+supports; the `[x]`/`[~]`/`[ ]` prefix is parsed back out into a normal `{description, status}`
+structure before anything renders it, so the CLI panel and GUI checklist card look identical
+either way. If the model forgets the prefix entirely, that step is just treated as pending rather
+than causing an error.
+
 ## Connecting frontend, backend, and database
 
 Building each layer separately is the easy part - the tools above already covered that. What
