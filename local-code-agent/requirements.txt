@@ -15,6 +15,15 @@ pyflakes>=3.2.0
 # Install on demand: pip install psycopg2-binary   (Postgres)
 # Install on demand: pip install pymysql            (MySQL)
 
+# Optional but recommended: powers format_file and run_tests for Python projects.
+# Install on demand: pip install black pytest
+# black>=24.0.0
+# pytest>=8.0.0
+
+# Optional: SQL formatting for format_file (pure Python, no external binary needed).
+# Install on demand: pip install sqlparse
+# sqlparse>=0.5.0
+
 # Optional: gives the GUI a real app window instead of opening in your browser.
 # Install on demand: pip install pywebview
 # pywebview>=5.0
