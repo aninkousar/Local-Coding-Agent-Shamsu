@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 
 from agent.ollama_client import OllamaClient, OllamaError
-from agent.tools import ToolRegistry, TOOL_SCHEMAS
+from agent.tools import ToolRegistry, TOOL_SCHEMAS, parse_plan_steps
 from agent.memory import ConversationMemory
 
 from . import events
@@ -60,7 +60,7 @@ class GuiAgentLoop:
                         raw_args = {}
 
                 if name == "update_plan":
-                    events.push_event({"type": "plan_update", "steps": raw_args.get("steps", [])})
+                    events.push_event({"type": "plan_update", "steps": parse_plan_steps(raw_args.get("steps", []))})
                 else:
                     events.push_event({"type": "tool_call", "name": name, "args": raw_args})
 
