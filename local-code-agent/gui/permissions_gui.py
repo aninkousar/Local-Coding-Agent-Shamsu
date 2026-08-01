@@ -156,12 +156,15 @@ class GuiPermissionManager:
         choice = self._ask("action", description)
         return choice in ("y", "always", "session")
 
-    def request_db_write(self, description: str, sql_preview: str = "") -> bool:
+    def request_db_write(self, description: str, sql_preview: str = "", danger_warnings: list[str] | None = None) -> bool:
         if self._session_allow_all_db_writes:
             return True
+        danger = "This will modify a database - data changes are not covered by diff review."
+        if danger_warnings:
+            danger += "\n" + "\n".join(f"⚠ {w}" for w in danger_warnings)
         choice = self._ask(
             "db_write", description,
-            danger="This will modify a database - data changes are not covered by diff review.",
+            danger=danger,
             diff=sql_preview or None,
         )
         if choice == "y":
