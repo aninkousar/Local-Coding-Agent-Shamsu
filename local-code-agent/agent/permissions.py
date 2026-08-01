@@ -149,17 +149,17 @@ class PermissionManager:
         choice = self._ask(description)
         return choice in ("y", "always", "session")
 
-    def request_db_write(self, description: str, sql_preview: str = "") -> bool:
+    def request_db_write(self, description: str, sql_preview: str = "", danger_warnings: list[str] | None = None) -> bool:
         """Separate from file writes/commands so a session-wide 'yes' to file edits
         never silently also covers database writes, and vice versa."""
         if self._session_allow_all_db_writes:
             return True
         if sql_preview:
             console.print(f"[cyan]{sql_preview}[/cyan]")
-        choice = self._ask(
-            description,
-            danger="This will modify a database - data changes are not covered by undo/diff review.",
-        )
+        danger = "This will modify a database - data changes are not covered by undo/diff review."
+        if danger_warnings:
+            danger += "\n" + "\n".join(f"⚠ {w}" for w in danger_warnings)
+        choice = self._ask(description, danger=danger)
         if choice == "y":
             return True
         if choice in ("always", "session"):
