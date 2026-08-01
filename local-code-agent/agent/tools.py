@@ -525,21 +525,14 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan",
-            "description": "Record or update your step-by-step plan for the current task. Call this FIRST, before any other tool, for any request that will take more than one small action - break the work into a short numbered list of concrete segments. Call it again (re-sending the FULL list with updated statuses) whenever you finish a step or the plan needs to change. Skip this entirely for simple one-step requests (answering a question, reading one file, a single small edit).",
+            "description": "Record or update your step-by-step plan for the current task. Call this FIRST, before any other tool, for any request that will take more than one small action - break the work into a short list of concrete, single-purpose segments (one file, one function, one feature at a time - not broad steps like 'build the app'). Call it again (re-sending the FULL list) whenever you finish a step or the plan needs to change. Skip this entirely for simple one-step requests (answering a question, reading one file, a single small edit).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "steps": {
                         "type": "array",
-                        "description": "The full current plan, in order. Always re-send every step, not just the ones that changed.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "description": {"type": "string", "description": "A short, concrete description of this step."},
-                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-                            },
-                            "required": ["description", "status"],
-                        },
+                        "items": {"type": "string"},
+                        "description": "The full current plan, in order, as plain strings - always re-send every step, not just the ones that changed. Prefix EVERY step with exactly one of: '[ ] ' (not started yet), '[~] ' (working on it now), '[x] ' (finished). Example: [\"[x] Create the Product model\", \"[~] Build the home page template\", \"[ ] Add the cart route\"]",
                     },
                 },
                 "required": ["steps"],
@@ -900,6 +893,27 @@ TOOL_SCHEMAS = [
 ]
 
 
+def parse_plan_steps(raw_steps: list[str]) -> list[dict]:
+    """Parses update_plan's flat string-array format ('[ ] ...', '[~] ...', '[x] ...')
+    into the {"description", "status"} dicts the CLI panel and GUI checklist render.
+    Tolerant of a missing/malformed marker - defaults to "pending" rather than
+    erroring, since a small model won't always get the prefix exactly right."""
+    parsed = []
+    for raw in raw_steps:
+        raw = (raw or "").strip()
+        if raw.startswith("[x]"):
+            status, desc = "completed", raw[3:].strip()
+        elif raw.startswith("[~]"):
+            status, desc = "in_progress", raw[3:].strip()
+        elif raw.startswith("[ ]"):
+            status, desc = "pending", raw[3:].strip()
+        else:
+            status, desc = "pending", raw
+        if desc:
+            parsed.append({"description": desc, "status": status})
+    return parsed
+
+
 class ToolRegistry:
     def __init__(self, project_root: Path, permissions: PermissionManager,
                  index: CodebaseIndex, index_cfg: dict):
@@ -937,16 +951,17 @@ class ToolRegistry:
             return ToolResult(text=f"Error running {name}: {e}")
 
     # -- implementations --------------------------------------------------------
-    def _tool_update_plan(self, steps: list[dict]) -> ToolResult:
+    def _tool_update_plan(self, steps: list[str]) -> ToolResult:
         if not steps:
             return ToolResult(text="No steps given - a plan needs at least one step.")
-        self._current_plan = steps
+        parsed = parse_plan_steps(steps)
+        if not parsed:
+            return ToolResult(text="No usable steps given - a plan needs at least one non-empty step.")
+        self._current_plan = parsed
         lines = []
-        for i, s in enumerate(steps, 1):
-            desc = s.get("description", "")
-            status = s.get("status", "pending")
-            marker = {"completed": "[x]", "in_progress": "[~]"}.get(status, "[ ]")
-            lines.append(f"{marker} {i}. {desc}")
+        for i, s in enumerate(parsed, 1):
+            marker = {"completed": "[x]", "in_progress": "[~]"}.get(s["status"], "[ ]")
+            lines.append(f"{marker} {i}. {s['description']}")
         return ToolResult(text="\n".join(lines))
 
     def _tool_list_directory(self, path: str = ".", recursive: bool = False) -> ToolResult:
