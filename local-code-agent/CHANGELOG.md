@@ -4,6 +4,24 @@ All notable changes to Local Code Agent, in order. This reflects the actual buil
 this project rather than dated releases - entries are numbered, not timestamped, since they were
 all produced across one continuous development session rather than separate calendar releases.
 
+## 26. Simplified update_plan's schema
+A user reported a "tool registration issue" appearing specifically when asking the agent to
+implement a plan it had just proposed. `update_plan`'s parameters were a nested array of objects
+(each with a `description` string and a `status` enum) - structurally the most complex schema of
+any tool in this project, and schema complexity is a documented source of tool-calling
+reliability problems on smaller/local models. Without a way to reproduce the exact runtime error,
+this was addressed as the most likely and highest-value fix available: simplified `steps` from
+`array<{description, status}>` to a flat `array<string>`, with status encoded as a `[x]`/`[~]`/
+`[ ]` prefix parsed back into the same internal structure via a new shared `parse_plan_steps()`
+helper used by the tool implementation, the CLI panel, and the GUI checklist card alike - so
+rendering in both interfaces is unchanged, only what the model has to generate got simpler.
+Parsing is tolerant of a missing/malformed prefix (defaults to "pending" rather than erroring),
+since a small model won't always get it exactly right. This also directly serves a second,
+related request: plan steps are now guided by an explicit rule ("if a step needs the word "and",
+split it") toward smaller, more atomic segments, and the model is instructed to update the plan
+immediately after each step rather than batching several steps before reporting progress.
+- `agent/tools.py`, `agent/tool_loop.py`, `gui/agent_loop_gui.py`, `agent/prompts.py`, `README.md`
+
 ## 25. Real installation and verification of PHP's toolchain
 At the user's request, made a more persistent attempt to get PHP itself installed (the previous
 attempt had given up after `apt-get install golang-go`-style 403s; this time, `apt-get update`
