@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .ollama_client import OllamaClient, OllamaError
-from .tools import ToolRegistry, TOOL_SCHEMAS
+from .tools import ToolRegistry, TOOL_SCHEMAS, parse_plan_steps
 from .memory import ConversationMemory
 
 console = Console()
@@ -77,7 +77,7 @@ class AgentLoop:
                         raw_args = {}
 
                 if name == "update_plan":
-                    _render_plan(raw_args.get("steps", []))
+                    _render_plan(parse_plan_steps(raw_args.get("steps", [])))
                 else:
                     console.print(f"[dim]→ tool call: {name}({json.dumps(raw_args)[:200]})[/dim]")
                 result = self.tools.execute(name, raw_args)
