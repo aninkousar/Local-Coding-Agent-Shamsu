@@ -258,3 +258,37 @@ def check_sql_syntax(sql_text: str) -> tuple[bool, str | None]:
         return True, str(e)
     finally:
         conn.close()
+
+
+def format_sql(sql_text: str) -> str | None:
+    """Formats SQL via sqlparse if it's installed - pure Python library, no external
+    binary needed. Returns None if sqlparse isn't available (not: "already formatted")."""
+    try:
+        import sqlparse
+    except ImportError:
+        return None
+    return sqlparse.format(sql_text, reindent=True, keyword_case="upper")
+
+
+def detect_dangerous_sql(sql_text: str) -> list[str]:
+    """Heuristic, pure-Python scan for statements that are easy to regret: DELETE/UPDATE
+    with no WHERE clause (affects every row), DROP TABLE/DATABASE, TRUNCATE. Not a real
+    SQL parser - a WHERE clause hidden inside unusual formatting could confuse this, so
+    absence of a warning is not a guarantee of safety, only presence of one is a
+    meaningful signal. Used to enrich the permission prompt shown before db_execute/
+    db_execute_file actually run something, not as a hard blocker.
+    """
+    warnings = []
+    for stmt in (s.strip() for s in sql_text.split(";") if s.strip()):
+        upper = stmt.upper()
+        if upper.startswith("DELETE") and " WHERE " not in f" {upper} ":
+            warnings.append(f"DELETE with no WHERE clause - affects EVERY row: {stmt[:100]}")
+        elif upper.startswith("UPDATE") and " WHERE " not in f" {upper} ":
+            warnings.append(f"UPDATE with no WHERE clause - affects EVERY row: {stmt[:100]}")
+        elif upper.startswith("DROP TABLE"):
+            warnings.append(f"DROP TABLE - permanently deletes the table and its data: {stmt[:100]}")
+        elif upper.startswith("DROP DATABASE"):
+            warnings.append(f"DROP DATABASE - permanently deletes the entire database: {stmt[:100]}")
+        elif upper.startswith("TRUNCATE"):
+            warnings.append(f"TRUNCATE - permanently deletes all rows: {stmt[:100]}")
+    return warnings
