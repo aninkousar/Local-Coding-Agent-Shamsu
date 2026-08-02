@@ -4,6 +4,26 @@ All notable changes to Local Code Agent, in order. This reflects the actual buil
 this project rather than dated releases - entries are numbered, not timestamped, since they were
 all produced across one continuous development session rather than separate calendar releases.
 
+## 27. Found the real cause of the "tool registration issue" (error-message quality, not schema)
+Entry #26 fixed `update_plan`'s schema based on an educated guess, without being able to see the
+actual error. The user then shared the model's own text, which revealed the true cause: the model
+called `update_plan` with NO `steps` argument at all, got back a raw Python `TypeError` message
+from the generic dispatcher, and misread that jargon as evidence the tool was "incorrectly
+registered" - then abandoned the tool entirely rather than just retrying with the argument
+included. The schema wasn't the problem; the error message was.
+
+Two fixes: (1) `ToolRegistry.execute()`'s generic `TypeError` handler no longer surfaces a raw
+Python exception - it now explicitly says the arguments were wrong *this time*, that this is not
+a sign of a broken/unavailable tool, and to retry with corrected arguments. This fix is generic,
+not `update_plan`-specific - verified it also improves the message for `read_file` called with no
+arguments, and for a call using a completely wrong keyword argument name. (2) `update_plan`
+specifically now has `steps` default to `None` instead of being a required positional parameter,
+so a call with no arguments reaches the function body (with a clear, example-driven corrective
+message) instead of raising before ever entering it; it also now tolerates a bare string where a
+list was expected, coercing rather than erroring. A new system prompt rule states explicitly:
+a tool argument error means retry with corrected arguments, never abandon or route around a tool.
+- `agent/tools.py`, `agent/prompts.py`
+
 ## 26. Simplified update_plan's schema
 A user reported a "tool registration issue" appearing specifically when asking the agent to
 implement a plan it had just proposed. `update_plan`'s parameters were a nested array of objects
