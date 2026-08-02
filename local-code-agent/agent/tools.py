@@ -946,14 +946,27 @@ class ToolRegistry:
         try:
             return handler(**args)
         except TypeError as e:
-            return ToolResult(text=f"Error: bad arguments for {name}: {e}")
+            return ToolResult(
+                text=f"You called {name} with a missing or incorrect argument ({e}). "
+                     f"This just means the arguments were wrong this time - re-check what {name} "
+                     f"requires and call it again with the correct arguments. This is NOT a sign "
+                     f"the tool is broken, unavailable, or misconfigured - it works fine, just retry it correctly."
+            )
         except Exception as e:  # keep the agent loop alive on tool errors
             return ToolResult(text=f"Error running {name}: {e}")
 
     # -- implementations --------------------------------------------------------
-    def _tool_update_plan(self, steps: list[str]) -> ToolResult:
+    def _tool_update_plan(self, steps: list[str] | None = None) -> ToolResult:
+        if isinstance(steps, str):
+            steps = [steps]  # tolerate a bare string instead of a list
         if not steps:
-            return ToolResult(text="No steps given - a plan needs at least one step.")
+            return ToolResult(
+                text="update_plan needs a 'steps' argument: a list of at least one string, "
+                     "each prefixed with '[ ] ', '[~] ', or '[x] '. Example: "
+                     "steps=[\"[ ] First thing to do\", \"[~] Second thing\"]. "
+                     "Call update_plan again with that argument included - the tool itself is fine, "
+                     "it just needs the argument this time."
+            )
         parsed = parse_plan_steps(steps)
         if not parsed:
             return ToolResult(text="No usable steps given - a plan needs at least one non-empty step.")
