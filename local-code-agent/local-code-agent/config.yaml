@@ -1,0 +1,118 @@
+# Local Code Agent configuration
+# Everything here runs against your local Ollama server - no internet required.
+
+ollama:
+  host: "http://localhost:11434"
+  chat_model: "qwen3.5:9b"          # main coding + vision model - a step up from 4B, tight
+                                     # fit on 8GB RAM with no dedicated GPU. If it's too slow or
+                                     # unstable, drop back to "qwen3.5:4b" (see README).
+  embed_model: "nomic-embed-text"  # tiny embedding model used for codebase search
+  context_window: 20000              # bumped at the user's request - a much larger jump than the
+                                     # earlier 8192, and worth being direct about: KV cache memory
+                                     # scales with this number, so this meaningfully increases the
+                                     # 9B model's RAM footprint ON TOP of its own already-tight fit
+                                     # on 8GB/no-GPU hardware. Verify this is actually comfortable
+                                     # on your machine (not just that it starts) - if you see
+                                     # swapping, stalling, or Ollama instability, this is the first
+                                     # thing to lower, alongside dropping to "qwen3.5:4b".
+                                     # If this line is removed/commented out entirely (not just set
+                                     # to a specific number), a fresh setup now proactively detects
+                                     # available RAM and picks a conservative starting value instead
+                                     # of a single hardcoded default - see context_window_source at
+                                     # startup for what was detected and why. An explicit number
+                                     # here always wins over detection, regardless of hardware.
+  temperature: 0.3
+  enable_thinking: false           # qwen3.5 small series: true = better reasoning, slower
+  keep_alive: "30m"                # keeps the model loaded between turns - avoids reload
+                                    # latency while you're reading diffs/approving prompts.
+                                    # Use -1 to never unload, or "5m" to go back to Ollama's default.
+  embed_batch_size: 32              # how many chunks to embed per HTTP call during indexing
+
+agent:
+  max_tool_iterations: 25          # safety cap on tool-call loops per turn
+  history_soft_limit_tokens: 14000  # summarize older raw chat past this point. Leaves ~6000 tokens
+                                    # of headroom under context_window for the system prompt, file
+                                    # index, task history, scratchpad, auto-retrieved project
+                                    # knowledge, AND the model's own response generation (num_ctx
+                                    # covers the whole exchange, not just the prompt) - generous
+                                    # given the system prompt itself is now only ~900 tokens.
+                                    # Recent-chat token usage is also reduced automatically now:
+                                    # the Context Selector deduplicates superseded reads (e.g. the
+                                    # same file read 3 times in a row keeps only the last one in
+                                    # full - see agent/context_manager.py's _dedupe_superseded_reads),
+                                    # so this budget goes further than the raw number suggests.
+  summary_max_chars: 1500           # Adaptive Compression, part 1: keeps the Long-term Memory
+                                    # summary itself bounded - once it grows past this after a
+                                    # compaction, it gets condensed into itself via one more
+                                    # (infrequent) model call, rather than growing indefinitely
+                                    # across many compactions in a long session.
+  full_detail_recent_count: 4        # Adaptive Compression, part 2: how many of the most recent
+                                    # tool results stay completely untouched (full detail)
+  light_compression_recent_count: 10  # tool results older than full_detail_recent_count but within
+                                    # this many messages get moderately trimmed
+  light_compression_max_chars: 1500  # cap for that moderate tier
+  heavy_compression_max_chars: 500  # cap for tool results older than light_compression_recent_count
+                                    # but still in the active window (not yet fully compacted away) -
+                                    # a middle ground between full detail and compact()'s full
+                                    # summarization, so the transition isn't one sharp cliff
+  scratchpad_persist_path: ".local_agent/SCRATCHPAD.md"  # the scratchpad (see update_scratchpad)
+                                    # is saved here and reloaded at the start of every new session -
+                                    # a fact learned last week is still known today, unlike anything
+                                    # else in this section, which resets when the process closes.
+  episode_log_path: ".local_agent/EPISODES.md"  # one-line summary appended at the end of every
+                                    # session (auto-generated from the final plan state, no LLM
+                                    # call needed), shown at the start of the next few sessions so
+                                    # there's brief continuity across separate runs of the agent.
+  plan_persist_path: ".local_agent/PLAN.md"  # the CURRENT, live plan is saved here continuously
+                                    # (every update_plan call), not just a one-line end-of-session
+                                    # summary - so a process restart (crash, update, closing the
+                                    # terminal) doesn't lose an in-progress plan. No reset/wipe
+                                    # behavior attached to this at all - purely additive.
+  context_overhead_budget_tokens: 2000  # the Context Budget Manager: total shared budget for the
+                                    # File Index and auto-retrieved Project Knowledge combined.
+                                    # Task history/scratchpad/episodic log are high-priority and
+                                    # always included in full; these two flexible stores split
+                                    # whatever's left of this budget, shrinking proportionally if
+                                    # the high-priority stores are unexpectedly large this turn -
+                                    # rather than each having its own fixed cap regardless of what
+                                    # else is using space.
+
+permissions:
+  # "ask" = prompt every single time (safest, matches "permission in all cases")
+  # "ask_once_per_session" = prompt once per file/command, then remember for this run only
+  mode: "ask"
+  # Paths the agent is allowed to ever touch. Empty = current working directory only.
+  allowed_roots: []
+  # Commands that are always denied outright, no prompt, regardless of user approval.
+  hard_denylist:
+    - "rm -rf /"
+    - ":(){ :|:& };:"
+    - "mkfs"
+    - "dd if="
+
+index:
+  db_path: ".local_agent/index.sqlite3"
+  chunk_lines: 80
+  chunk_overlap_lines: 10
+  ignore_dirs:
+    - ".git"
+    - "node_modules"
+    - "__pycache__"
+    - ".venv"
+    - "venv"
+    - "dist"
+    - "build"
+    - ".local_agent"
+  max_file_size_kb: 512
+  search_codebase_min_score: 0.3    # results below this similarity score are filtered out of
+                                     # search_codebase entirely, rather than always forcing out
+                                     # top_k regardless of how weak the matches are - if nothing
+                                     # clears the bar, that's told to the model plainly instead
+  file_index_max_entries: 100       # cap on the File Index's file listing - kept modest since
+                                     # it's included on every single turn, not just when relevant
+  focus_files_max: 2                 # how many recently-touched files count as anchors for
+                                     # dependency-graph-based Project Knowledge (replaces semantic
+                                     # RAG - see agent/context_manager.py's _dependency_context)
+  dependency_context_max_files: 4    # how many related files (via imports, both directions) get
+                                     # surfaced per turn once an anchor file exists
+  dependency_context_max_chars_per_file: 500  # preview length cap per related file shown
