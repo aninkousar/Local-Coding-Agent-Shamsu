@@ -1,0 +1,187 @@
+from __future__ import annotations
+from dataclasses import dataclass, field
+from pathlib import Path
+from rich.console import Console
+from rich.prompt import Prompt
+
+console = Console()
+
+
+class PermissionDenied(Exception):
+    pass
+
+
+@dataclass
+class PermissionManager:
+    """Nothing in this agent touches disk or a shell without going through here first.
+
+    Default posture: ask every single time. The user can widen trust interactively
+    (per-path or per-session), but the agent never assumes consent on its own.
+    """
+    allowed_roots: list[Path]
+    hard_denylist: list[str]
+    mode: str = "ask"  # "ask" | "ask_once_per_session"
+
+    _session_allow_paths: set[str] = field(default_factory=set)
+    _session_allow_commands: set[str] = field(default_factory=set)
+    _session_allow_all_reads: bool = False
+    _session_allow_all_writes: bool = False
+    _session_allow_all_db_writes: bool = False
+
+    # -------------------------------------------------------------------
+    def _within_allowed_roots(self, path: Path) -> bool:
+        rp = path.resolve()
+        for root in self.allowed_roots:
+            try:
+                rp.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def _ask(self, question: str, danger: str = "") -> str:
+        console.print("\n[bold yellow]Permission required[/bold yellow]")
+        if danger:
+            console.print(f"[red]{danger}[/red]")
+        console.print(question)
+        choice = Prompt.ask(
+            "Allow?",
+            choices=["y", "n", "always", "session"],
+            default="n",
+        )
+        return choice
+
+    # -- file reads -------------------------------------------------------
+    def request_read(self, path: Path) -> bool:
+        path = Path(path)
+        if not self._within_allowed_roots(path):
+            console.print(f"[red]Blocked:[/red] {path} is outside the allowed project directory.")
+            return False
+        if self._session_allow_all_reads or str(path) in self._session_allow_paths:
+            return True
+        choice = self._ask(f"Read file: [cyan]{path}[/cyan]?")
+        if choice == "y":
+            return True
+        if choice == "always":
+            self._session_allow_paths.add(str(path))
+            return True
+        if choice == "session":
+            self._session_allow_all_reads = True
+            return True
+        return False
+
+    def request_read_batch(self, paths: list[Path]) -> bool:
+        """One approval covering several files at once (e.g. reading several related
+        files before a coordinated change)."""
+        for p in paths:
+            if not self._within_allowed_roots(p):
+                console.print(f"[red]Blocked:[/red] {p} is outside the allowed project directory.")
+                return False
+        if self._session_allow_all_reads:
+            return True
+        if all(str(p) in self._session_allow_paths for p in paths):
+            return True
+        choice = self._ask(f"Read these {len(paths)} files?\n" + "\n".join(f"  - {p}" for p in paths))
+        if choice == "y":
+            return True
+        if choice == "always":
+            for p in paths:
+                self._session_allow_paths.add(str(p))
+            return True
+        if choice == "session":
+            self._session_allow_all_reads = True
+            return True
+        return False
+
+    # -- file writes/edits --------------------------------------------------
+    def request_write(self, path: Path, preview: str = "") -> bool:
+        path = Path(path)
+        if not self._within_allowed_roots(path):
+            console.print(f"[red]Blocked:[/red] {path} is outside the allowed project directory.")
+            return False
+        if self._write_pre_allowed(path):
+            return True
+        exists = path.exists()
+        verb = "Modify" if exists else "Create"
+        if preview:
+            console.print(preview)
+        choice = self._ask(
+            f"{verb} file: [cyan]{path}[/cyan]?",
+            danger="This will change a file on your disk." if exists else "",
+        )
+        if choice == "y":
+            return True
+        if choice == "always":
+            self._session_allow_paths.add(f"write:{path}")
+            return True
+        if choice == "session":
+            self._session_allow_all_writes = True
+            return True
+        return False
+
+    def _write_pre_allowed(self, path: Path) -> bool:
+        return self._session_allow_all_writes or f"write:{path}" in self._session_allow_paths
+
+    def request_write_batch(self, paths: list[Path], diffs: list[str] | None = None) -> bool:
+        """One approval covering several files at once (e.g. scaffolding a new project).
+        Callers must render all previews/diffs to the user before calling this in CLI mode;
+        `diffs` is accepted (and used by the GUI's permission manager) for interface parity."""
+        for p in paths:
+            if not self._within_allowed_roots(p):
+                console.print(f"[red]Blocked:[/red] {p} is outside the allowed project directory.")
+                return False
+        if self._session_allow_all_writes:
+            return True
+        choice = self._ask(
+            f"Create/modify these {len(paths)} files as shown above?",
+            danger="This will write multiple files to disk.",
+        )
+        if choice == "y":
+            return True
+        if choice in ("always", "session"):
+            self._session_allow_all_writes = True
+            return True
+        return False
+
+    def request_action(self, description: str) -> bool:
+        """Generic one-off approval for actions that aren't a file read/write/command
+        (e.g. opening a browser preview)."""
+        choice = self._ask(description)
+        return choice in ("y", "always", "session")
+
+    def request_db_write(self, description: str, sql_preview: str = "", danger_warnings: list[str] | None = None) -> bool:
+        """Separate from file writes/commands so a session-wide 'yes' to file edits
+        never silently also covers database writes, and vice versa."""
+        if self._session_allow_all_db_writes:
+            return True
+        if sql_preview:
+            console.print(f"[cyan]{sql_preview}[/cyan]")
+        danger = "This will modify a database - data changes are not covered by undo/diff review."
+        if danger_warnings:
+            danger += "\n" + "\n".join(f"⚠ {w}" for w in danger_warnings)
+        choice = self._ask(description, danger=danger)
+        if choice == "y":
+            return True
+        if choice in ("always", "session"):
+            self._session_allow_all_db_writes = True
+            return True
+        return False
+
+    # -- shell commands -------------------------------------------------------
+    def request_command(self, command: str) -> bool:
+        for bad in self.hard_denylist:
+            if bad in command:
+                console.print("[red]Blocked outright:[/red] command matches a hard-denied pattern.")
+                return False
+        if command in self._session_allow_commands:
+            return True
+        choice = self._ask(
+            f"Run shell command:\n  [cyan]{command}[/cyan]",
+            danger="Shell commands can modify or delete files, install packages, or access the network.",
+        )
+        if choice == "y":
+            return True
+        if choice in ("always", "session"):
+            self._session_allow_commands.add(command)
+            return True
+        return False
