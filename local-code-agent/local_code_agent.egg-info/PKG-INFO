@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: local-code-agent
+Version: 0.1.0
+Summary: A fully offline, permission-gated coding agent for low-spec machines.
+Requires-Python: >=3.10
+Requires-Dist: requests>=2.31.0
+Requires-Dist: rich>=13.7.0
+Requires-Dist: PyYAML>=6.0.1
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: flask>=3.0.0
+Requires-Dist: pyflakes>=3.2.0
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn[standard]>=0.29.0
+Requires-Dist: websockets>=12.0
+Requires-Dist: psutil>=6.0.0
+Provides-Extra: documents
+Requires-Dist: pypdf>=4.0.0; extra == "documents"
+Requires-Dist: python-docx>=1.1.0; extra == "documents"
+Provides-Extra: gui-window
+Requires-Dist: pywebview>=5.0; extra == "gui-window"

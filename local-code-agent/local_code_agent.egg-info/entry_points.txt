@@ -1,0 +1,3 @@
+[console_scripts]
+local-agent = agent.main:main
+local-agent-gui = gui.launch:main

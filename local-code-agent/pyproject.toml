@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-code-agent"
+version = "0.1.0"
+description = "A fully offline, permission-gated coding agent for low-spec machines."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.7.0",
+    "PyYAML>=6.0.1",
+    "numpy>=1.26.0",
+    "flask>=3.0.0",
+    "pyflakes>=3.2.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "websockets>=12.0",
+    "psutil>=6.0.0",
+]
+
+[project.optional-dependencies]
+documents = ["pypdf>=4.0.0", "python-docx>=1.1.0"]
+gui-window = ["pywebview>=5.0"]
+
+[project.scripts]
+local-agent = "agent.main:main"
+local-agent-gui = "gui.launch:main"
+
+[tool.setuptools]
+packages = ["agent", "gui"]
+
+[tool.setuptools.package-data]
+gui = ["static/*"]
